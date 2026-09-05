@@ -22,6 +22,13 @@
     "start": "node ./bin/index.js"
   },
   "homepage": "https://www.whichllmmodel.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzubairtahir/whichllmmodel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mzubairtahir/whichllmmodel/issues"
+  },
   "keywords": [
     "whichllmmodel",
     "wllm",

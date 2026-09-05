@@ -46,7 +46,7 @@ export async function recommendCommand(
     color: 'cyan',
   }).start();
 
-  const { recommendations } = await fetchRecommendations(
+  const result = await fetchRecommendations(
     hardware,
     context,
     cpuOffload,
@@ -55,6 +55,18 @@ export async function recommendCommand(
 
   spinner.stop();
 
+  if (!result.success) {
+    console.log(chalk.yellow('✕ Server is currently not responding.'));
+    console.log(
+      chalk.gray(
+        `  Unable to reach recommendation service (${result.sourceUrl || 'https://www.whichllmmodel.com/api/cli/recommend'}).`
+      )
+    );
+    console.log(chalk.gray('  Please check your connection or try again shortly.'));
+    console.log();
+    return;
+  }
+
   // Render clean model list
-  renderCleanRecommendations(recommendations);
+  renderCleanRecommendations(result.recommendations);
 }

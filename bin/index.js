@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 // src/index.ts
+import fs from "fs";
+import path from "path";
 import { Command } from "commander";
 
 // src/hardware/detector.ts
@@ -276,253 +278,6 @@ function profileCommand() {
 import ora from "ora";
 import chalk2 from "chalk";
 
-// src/api/mock.ts
-var MODEL_CATALOG = [
-  {
-    id: "qwen2.5-coder:14b",
-    name: "Qwen 2.5 Coder 14B",
-    provider: "Qwen",
-    parametersInB: 14.7,
-    slug: "Qwen-2.5-Coder-14B",
-    ollamaCommand: "ollama run qwen2.5-coder:14b",
-    huggingfaceUrl: "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
-    baseWeightGB: 8.9,
-    benchmark: { category: "coding", name: "swe-bench-pro", score: 64.6 }
-  },
-  {
-    id: "deepseek-r1:14b",
-    name: "DeepSeek R1 Distill Qwen 14B",
-    provider: "DeepSeek",
-    parametersInB: 14.7,
-    slug: "DeepSeek-R1-Distill-Qwen-14B",
-    ollamaCommand: "ollama run deepseek-r1:14b",
-    huggingfaceUrl: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B-GGUF",
-    baseWeightGB: 8.9,
-    benchmark: { category: "reasoning", name: "gpqa-diamond", score: 59.1 }
-  },
-  {
-    id: "qwen2.5-coder:32b",
-    name: "Qwen 2.5 Coder 32B",
-    provider: "Qwen",
-    parametersInB: 32.5,
-    slug: "Qwen-2.5-Coder-32B",
-    ollamaCommand: "ollama run qwen2.5-coder:32b",
-    huggingfaceUrl: "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
-    baseWeightGB: 19.8,
-    benchmark: { category: "coding", name: "swe-bench-pro", score: 71.4 }
-  },
-  {
-    id: "deepseek-r1:32b",
-    name: "DeepSeek R1 Distill Qwen 32B",
-    provider: "DeepSeek",
-    parametersInB: 32.5,
-    slug: "DeepSeek-R1-Distill-Qwen-32B",
-    ollamaCommand: "ollama run deepseek-r1:32b",
-    huggingfaceUrl: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B-GGUF",
-    baseWeightGB: 19.8,
-    benchmark: { category: "reasoning", name: "gpqa-diamond", score: 62.1 }
-  },
-  {
-    id: "llama3.3:70b",
-    name: "Llama 3.3 70B",
-    provider: "Meta",
-    parametersInB: 70,
-    slug: "Llama-3.3-70B-Instruct",
-    ollamaCommand: "ollama run llama3.3:70b",
-    huggingfaceUrl: "https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct",
-    baseWeightGB: 41.5,
-    benchmark: { category: "general", name: "mmlu-pro", score: 68.3 }
-  },
-  {
-    id: "llama3.1:8b",
-    name: "Llama 3.1 8B",
-    provider: "Meta",
-    parametersInB: 8,
-    slug: "Llama-3.1-8B-Instruct",
-    ollamaCommand: "ollama run llama3.1:8b",
-    huggingfaceUrl: "https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct-GGUF",
-    baseWeightGB: 4.8,
-    benchmark: { category: "general", name: "mmlu-pro", score: 48.3 }
-  },
-  {
-    id: "qwen2.5-coder:7b",
-    name: "Qwen 2.5 Coder 7B",
-    provider: "Qwen",
-    parametersInB: 7.6,
-    slug: "Qwen-2.5-Coder-7B",
-    ollamaCommand: "ollama run qwen2.5-coder:7b",
-    huggingfaceUrl: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-    baseWeightGB: 4.7,
-    benchmark: { category: "coding", name: "swe-bench-pro", score: 55.4 }
-  },
-  {
-    id: "llama3.2:3b",
-    name: "Llama 3.2 3B",
-    provider: "Meta",
-    parametersInB: 3.2,
-    slug: "Llama-3.2-3B-Instruct",
-    ollamaCommand: "ollama run llama3.2:3b",
-    huggingfaceUrl: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct-GGUF",
-    baseWeightGB: 2,
-    benchmark: { category: "general", name: "mmlu-pro", score: 37.2 }
-  },
-  {
-    id: "qwen2.5:3b",
-    name: "Qwen 2.5 3B",
-    provider: "Qwen",
-    parametersInB: 3.1,
-    slug: "Qwen-2.5-3B-Instruct",
-    ollamaCommand: "ollama run qwen2.5:3b",
-    huggingfaceUrl: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF",
-    baseWeightGB: 1.9,
-    benchmark: { category: "general", name: "mmlu-pro", score: 38.6 }
-  }
-];
-function parseContextTokens(ctx) {
-  const lower = ctx.toLowerCase().trim();
-  if (lower.endsWith("k")) {
-    const num = parseFloat(lower.replace("k", ""));
-    return !isNaN(num) ? Math.round(num * 1024) : 32768;
-  }
-  const parsed = parseInt(ctx, 10);
-  return !isNaN(parsed) && parsed > 0 ? parsed : 32768;
-}
-function generateDummyRecommendations(hardware, contextStr = "32k", cpuOffload = true, sortBy = "largest_vram") {
-  const queryContextTokens = parseContextTokens(contextStr);
-  let vramBudgetGB = 0;
-  let isUnified = false;
-  if (hardware.type === "unified_memory" && hardware.unifiedMemory) {
-    vramBudgetGB = hardware.unifiedMemory.usableGB;
-    isUnified = true;
-  } else if (hardware.type === "gpu" && hardware.vram) {
-    vramBudgetGB = hardware.vram.usableGB;
-  } else {
-    vramBudgetGB = 0;
-  }
-  const ramBudgetGB = Math.max(2, hardware.ram.usableGB);
-  const totalAcceleratedGB = isUnified ? vramBudgetGB : vramBudgetGB > 0 ? vramBudgetGB : ramBudgetGB * 0.75;
-  const kvCacheGB = Number((queryContextTokens / 32768 * 0.95).toFixed(2));
-  const candidates = [];
-  const quantMultipliers = {
-    Q4_K_M: 0.58,
-    Q5_K_M: 0.7,
-    Q8_0: 1.05,
-    fp16: 2
-  };
-  for (const item of MODEL_CATALOG) {
-    const availableQuants = [];
-    for (const [format, mult] of Object.entries(quantMultipliers)) {
-      const weightGB = Number((item.baseWeightGB * mult).toFixed(2));
-      const totalReq = Number((weightGB + kvCacheGB).toFixed(2));
-      let fitStatus = "oom";
-      let fitsInVram = false;
-      if (isUnified) {
-        if (totalReq <= vramBudgetGB) {
-          fitStatus = "vram";
-          fitsInVram = true;
-        } else if (totalReq <= hardware.ram.usableGB) {
-          fitStatus = "ram";
-          fitsInVram = false;
-        } else {
-          fitStatus = "oom";
-        }
-      } else if (vramBudgetGB > 0) {
-        if (totalReq <= vramBudgetGB) {
-          fitStatus = "vram";
-          fitsInVram = true;
-        } else if (cpuOffload && totalReq <= vramBudgetGB + ramBudgetGB * 0.6) {
-          fitStatus = "offload";
-          fitsInVram = false;
-        } else {
-          fitStatus = "oom";
-        }
-      } else {
-        if (totalReq <= ramBudgetGB * 0.75) {
-          fitStatus = "ram";
-          fitsInVram = false;
-        } else {
-          fitStatus = "oom";
-        }
-      }
-      availableQuants.push({
-        format,
-        fileSizeBytesGb: weightGB,
-        totalRequiredMemoryGB: totalReq,
-        fitStatus,
-        fitsInVram,
-        downloadUrl: `${item.huggingfaceUrl}/resolve/main/${item.slug}.${format}.gguf`
-      });
-    }
-    const validQuants = availableQuants.filter((q) => q.fitStatus !== "oom");
-    if (validQuants.length === 0) continue;
-    let primaryQuant = validQuants.find((q) => q.format === "Q5_K_M" && q.fitsInVram) || validQuants.find((q) => q.format === "Q4_K_M" && q.fitsInVram) || validQuants.find((q) => q.fitsInVram) || validQuants[0];
-    const recFitStatus = primaryQuant.fitStatus === "oom" ? "ram" : primaryQuant.fitStatus;
-    candidates.push({
-      item,
-      recommendedQuant: {
-        format: primaryQuant.format,
-        fileSizeBytesGb: primaryQuant.fileSizeBytesGb,
-        totalRequiredMemoryGB: primaryQuant.totalRequiredMemoryGB,
-        weightsMemoryGB: primaryQuant.fileSizeBytesGb || 0,
-        kvCacheMemoryGB: kvCacheGB,
-        fitStatus: recFitStatus
-      },
-      availableQuants
-    });
-  }
-  switch (sortBy) {
-    case "largest_vram":
-      candidates.sort((a, b) => {
-        const aVram = a.recommendedQuant.fitStatus === "vram" ? 1 : 0;
-        const bVram = b.recommendedQuant.fitStatus === "vram" ? 1 : 0;
-        if (aVram !== bVram) return bVram - aVram;
-        return b.recommendedQuant.totalRequiredMemoryGB - a.recommendedQuant.totalRequiredMemoryGB;
-      });
-      break;
-    case "top_coding":
-      candidates.sort((a, b) => {
-        const aScore = a.item.benchmark.category === "coding" ? a.item.benchmark.score : 0;
-        const bScore = b.item.benchmark.category === "coding" ? b.item.benchmark.score : 0;
-        return bScore - aScore;
-      });
-      break;
-    case "highest_params":
-      candidates.sort((a, b) => b.item.parametersInB - a.item.parametersInB);
-      break;
-    case "highest_quality":
-      candidates.sort((a, b) => {
-        const quantRanks = { fp16: 4, Q8_0: 3, Q5_K_M: 2, Q4_K_M: 1 };
-        const aRank = quantRanks[a.recommendedQuant.format] || 0;
-        const bRank = quantRanks[b.recommendedQuant.format] || 0;
-        if (aRank !== bRank) return bRank - aRank;
-        return b.item.benchmark.score - a.item.benchmark.score;
-      });
-      break;
-  }
-  const top3 = candidates.slice(0, 3).map((c, index) => ({
-    rank: index + 1,
-    name: c.item.name,
-    provider: c.item.provider,
-    parametersInB: c.item.parametersInB,
-    websiteUrl: `https://www.whichllmmodel.com/models/${c.item.slug.toLowerCase()}`,
-    huggingfaceUrl: c.item.huggingfaceUrl,
-    ollamaCommand: c.item.ollamaCommand,
-    recommendedQuant: c.recommendedQuant,
-    availableQuants: c.availableQuants,
-    benchmark: c.item.benchmark
-  }));
-  return {
-    success: true,
-    meta: {
-      queryContextTokens,
-      sortBy,
-      totalModelsEvaluated: MODEL_CATALOG.length,
-      returnedCount: top3.length
-    },
-    recommendations: top3
-  };
-}
-
 // src/api/normalizer.ts
 function normalizeRawModel(raw, index) {
   const rank = raw.rank || index + 1;
@@ -601,11 +356,9 @@ function normalizeRawModel(raw, index) {
 }
 
 // src/api/client.ts
-var REMOTE_API_URL = "https://www.whichllmmodel.com/api/cli/recommend";
-var LOCAL_API_URL = "http://localhost:3000/api/cli/recommend";
+var PRODUCTION_API_URL = "https://www.whichllmmodel.com/api/cli/recommend";
 async function fetchRecommendations(hardware, context = "32k", cpuOffload = true, sortBy = "largest_vram") {
-  const customUrl = process.env.WHICH_MODEL_API_URL;
-  const targetUrls = customUrl ? [customUrl] : [REMOTE_API_URL, LOCAL_API_URL];
+  const apiUrl = process.env.WHICH_MODEL_API_URL || PRODUCTION_API_URL;
   const effectiveCpuOffload = hardware.type === "unified_memory" ? false : cpuOffload;
   const payload = {
     hardwareType: hardware.type,
@@ -620,49 +373,48 @@ async function fetchRecommendations(hardware, context = "32k", cpuOffload = true
     cpuOffload: effectiveCpuOffload,
     sortBy
   };
-  const bodyStr = JSON.stringify(payload);
-  for (const url of targetUrls) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4e3);
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "whichllmmodel-cli/1.0.0",
-          Accept: "application/json"
-        },
-        body: bodyStr,
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (response.ok) {
-        const rawData = await response.json();
-        if (rawData && Array.isArray(rawData.recommendations)) {
-          const normalized = rawData.recommendations.map(normalizeRawModel);
-          return {
-            recommendations: normalized.slice(0, 3),
-            isMock: false,
-            sourceUrl: url,
-            payload
-          };
-        }
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6e3);
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "whichllmmodel-cli/1.0.0",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (response.ok) {
+      const rawData = await response.json();
+      if (rawData && Array.isArray(rawData.recommendations)) {
+        const normalized = rawData.recommendations.map(normalizeRawModel);
+        return {
+          success: true,
+          recommendations: normalized.slice(0, 3),
+          sourceUrl: apiUrl,
+          payload
+        };
       }
-    } catch {
     }
+    return {
+      success: false,
+      recommendations: [],
+      error: `Server responded with ${response.status} ${response.statusText}`,
+      sourceUrl: apiUrl,
+      payload
+    };
+  } catch (err) {
+    return {
+      success: false,
+      recommendations: [],
+      error: err.message || "Connection failed",
+      sourceUrl: apiUrl,
+      payload
+    };
   }
-  const mockData = generateDummyRecommendations(
-    hardware,
-    context,
-    effectiveCpuOffload,
-    sortBy
-  );
-  return {
-    recommendations: mockData.recommendations.map(normalizeRawModel),
-    isMock: true,
-    sourceUrl: "client-simulation",
-    payload
-  };
 }
 
 // src/types.ts
@@ -713,17 +465,50 @@ async function recommendCommand(options = {}) {
     text: "Finding optimal models...",
     color: "cyan"
   }).start();
-  const { recommendations } = await fetchRecommendations(
+  const result = await fetchRecommendations(
     hardware,
     context,
     cpuOffload,
     sortBy
   );
   spinner.stop();
-  renderCleanRecommendations(recommendations);
+  if (!result.success) {
+    console.log(chalk2.yellow("\u2715 Server is currently not responding."));
+    console.log(
+      chalk2.gray(
+        `  Unable to reach recommendation service (${result.sourceUrl || "https://www.whichllmmodel.com/api/cli/recommend"}).`
+      )
+    );
+    console.log(chalk2.gray("  Please check your connection or try again shortly."));
+    console.log();
+    return;
+  }
+  renderCleanRecommendations(result.recommendations);
 }
 
 // src/index.ts
+function loadDotenv() {
+  const envPath = path.resolve(process.cwd(), ".env");
+  if (fs.existsSync(envPath)) {
+    try {
+      const content = fs.readFileSync(envPath, "utf-8");
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const eqIdx = trimmed.indexOf("=");
+        if (eqIdx !== -1) {
+          const key = trimmed.slice(0, eqIdx).trim();
+          const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
+          if (key && process.env[key] === void 0) {
+            process.env[key] = val;
+          }
+        }
+      }
+    } catch {
+    }
+  }
+}
+loadDotenv();
 var program = new Command();
 program.name("whichllmmodel").description("Hardware-aware CLI for recommending and running local LLMs").version("1.0.0");
 program.command("profile").description(
