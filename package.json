@@ -1,6 +1,6 @@
 {
   "name": "whichllmmodel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Official open-source CLI for whichllmmodel.com - Hardware-aware local LLM recommendation engine",
   "type": "module",
   "main": "./bin/index.js",
