@@ -1,5 +1,6 @@
 import chalk from 'chalk';
-import { HardwareSpec, ModelUnified } from '../types.js';
+import { HardwareSpec } from '../types.js';
+import { buildWebFinderUrl } from '../hardware/url.js';
 
 /**
  * Clean one-line hardware summary
@@ -29,97 +30,97 @@ export function formatHardwareSummaryLine(hw: HardwareSpec): string {
 }
 
 /**
- * Format clean fit badge
- */
-export function formatFitBadge(fitTier: string): string {
-  const lower = fitTier.toLowerCase();
-  if (lower === 'optimal' || lower === 'vram') {
-    return chalk.green('100% VRAM (Optimal)');
-  }
-  if (lower === 'good') {
-    return chalk.green('Fits in VRAM');
-  }
-  if (lower === 'tight') {
-    return chalk.yellow('Tight Fit (VRAM)');
-  }
-  if (lower === 'offload' || lower === 'cpu_offload') {
-    return chalk.yellow('CPU RAM Offload');
-  }
-  if (lower === 'ram') {
-    return chalk.cyan('System RAM Only');
-  }
-  return chalk.red('Exceeds Memory');
-}
-
-/**
- * Render clean, readable list of recommended models
- */
-export function renderCleanRecommendations(recommendations: ModelUnified[]): void {
-  if (recommendations.length === 0) {
-    console.log(chalk.gray('No matching models found.'));
-    return;
-  }
-
-  console.log(chalk.bold.white('Top Recommendations:'));
-  console.log();
-
-  for (const m of recommendations) {
-    const paramStr = m.parameters ? ` (${m.parameters})` : '';
-    console.log(
-      `  ${chalk.bold.cyan(m.rank + '.')} ${chalk.bold.white(m.name)}${chalk.gray(paramStr)}`
-    );
-
-    // Quant & Memory
-    console.log(
-      `     ${chalk.gray('Quant:')}    ${chalk.yellow(m.recommendedQuant)} ` +
-      chalk.gray(`(${m.memoryFootprint.totalRequiredGB} GB required)`)
-    );
-
-    // Fit status
-    console.log(`     ${chalk.gray('Fit:')}      ${formatFitBadge(m.fitTier)}`);
-
-    // Benchmark Score (if available)
-    if (m.scores.coding !== undefined) {
-      console.log(`     ${chalk.gray('Score:')}    ${chalk.green.bold(m.scores.coding)} ${chalk.gray('(coding)')}`);
-    } else if (m.scores.overall !== undefined) {
-      console.log(`     ${chalk.gray('Score:')}    ${chalk.green.bold(m.scores.overall)} ${chalk.gray('(overall)')}`);
-    } else if (m.scores.reasoning !== undefined) {
-      console.log(`     ${chalk.gray('Score:')}    ${chalk.green.bold(m.scores.reasoning)} ${chalk.gray('(reasoning)')}`);
-    }
-
-    // Direct Website URL
-    console.log(`     ${chalk.gray('URL:')}      ${chalk.cyan.underline(m.websiteUrl)}`);
-    console.log();
-  }
-}
-
-/**
- * Render clean hardware profile for `wllm profile`
+ * Render clean hardware profile with Physical Installed vs Live Available memory
+ * and direct pre-filled WhichLLM Local Finder web app URL
  */
 export function renderCleanHardwareProfile(hw: HardwareSpec): void {
-  console.log(chalk.bold.white('Hardware Profile:'));
+  const webUrl = buildWebFinderUrl(hw, { memoryMode: 'available' });
 
-  console.log(`  ${chalk.gray('Device:')}       ${chalk.white.bold(hw.name)}`);
-  console.log(`  ${chalk.gray('CPU:')}          ${chalk.white(hw.cpuName)} ${chalk.gray(`(${hw.platform} ${hw.arch})`)}`);
+  console.log();
+  console.log(
+    `${chalk.bold.hex('#6366F1')('whichllmmodel')} • ${chalk.bold.white('Hardware & Memory Profiler')}`
+  );
+  console.log();
+
+  // 1. Hardware Specification
+  console.log(chalk.bold.white('Hardware Detected:'));
+  console.log(`  ${chalk.gray('• Device:')}         ${chalk.white.bold(hw.name)}`);
+  console.log(
+    `  ${chalk.gray('• CPU:')}            ${chalk.white(hw.cpuName)} ${chalk.gray(`(${hw.platform} ${hw.arch})`)}`
+  );
+
+  let archDesc = chalk.yellow('CPU / System RAM Mode (No discrete GPU detected)');
+  if (hw.type === 'unified_memory') {
+    archDesc = chalk.green('Apple Silicon (Unified Memory)');
+  } else if (hw.type === 'gpu') {
+    archDesc = chalk.green('Discrete GPU');
+  }
+  console.log(`  ${chalk.gray('• Architecture:')}   ${archDesc}`);
+  console.log();
+
+  // 2. Memory Breakdown (Physical Installed vs Live Available)
+  console.log(chalk.bold.white('Memory Breakdown:'));
 
   if (hw.type === 'unified_memory' && hw.unifiedMemory) {
-    console.log(`  ${chalk.gray('Architecture:')} ${chalk.green('Apple Silicon Unified Memory')}`);
+    const totalGB = hw.unifiedMemory.totalGB;
+    const usableGB = hw.unifiedMemory.usableGB;
+    const pct = Math.round((usableGB / totalGB) * 100);
+
+    console.log(`  ${chalk.cyan('Physical Installed Memory:')}`);
     console.log(
-      `  ${chalk.gray('Memory:')}        ${chalk.cyan(hw.unifiedMemory.usableGB + ' GB')} usable / ${hw.unifiedMemory.totalGB} GB total (75% macOS VRAM ceiling)`
+      `    ${chalk.gray('• Unified Memory:')} ${chalk.white.bold(totalGB.toFixed(1) + ' GB')} installed`
+    );
+    console.log();
+    console.log(`  ${chalk.cyan('Live Available Memory (Metal VRAM Budget):')}`);
+    console.log(
+      `    ${chalk.gray('• Unified Memory:')} ${chalk.green.bold(usableGB.toFixed(1) + ' GB')} allocatable ${chalk.gray(`(75% macOS ceiling, ~${pct}% available)`)}`
+    );
+    console.log(
+      `    ${chalk.gray('• Free Host RAM:')}  ${chalk.white.bold(hw.ram.usableGB.toFixed(1) + ' GB')} free right now`
     );
   } else if (hw.type === 'gpu' && hw.vram) {
-    console.log(`  ${chalk.gray('Architecture:')} ${chalk.green('Discrete GPU')}`);
+    const vramTotal = hw.vram.totalGB;
+    const vramFree = hw.vram.usableGB;
+    const vramPct = Math.round((vramFree / vramTotal) * 100);
+
+    const ramTotal = hw.ram.totalGB;
+    const ramFree = hw.ram.usableGB;
+    const ramPct = Math.round((ramFree / ramTotal) * 100);
+
+    console.log(`  ${chalk.cyan('Physical Installed Memory:')}`);
     console.log(
-      `  ${chalk.gray('GPU VRAM:')}     ${chalk.cyan(hw.vram.usableGB + ' GB')} usable / ${hw.vram.totalGB} GB total`
+      `    ${chalk.gray('• GPU VRAM:')}     ${chalk.white.bold(vramTotal.toFixed(1) + ' GB')} installed`
     );
     console.log(
-      `  ${chalk.gray('System RAM:')}   ${chalk.cyan(hw.ram.usableGB + ' GB')} usable / ${hw.ram.totalGB} GB total`
+      `    ${chalk.gray('• System RAM:')}   ${chalk.white.bold(ramTotal.toFixed(1) + ' GB')} installed`
+    );
+    console.log();
+    console.log(`  ${chalk.cyan('Live Available Memory (Ready for LLMs):')}`);
+    console.log(
+      `    ${chalk.gray('• GPU VRAM:')}     ${chalk.green.bold(vramFree.toFixed(1) + ' GB')} available ${chalk.gray(`(${vramPct}% free)`)}`
+    );
+    console.log(
+      `    ${chalk.gray('• System RAM:')}   ${chalk.green.bold(ramFree.toFixed(1) + ' GB')} available ${chalk.gray(`(${ramPct}% free)`)}`
     );
   } else {
-    console.log(`  ${chalk.gray('Architecture:')} ${chalk.yellow('CPU / System RAM Mode')} ${chalk.gray('(No discrete GPU detected)')}`);
+    const ramTotal = hw.ram.totalGB;
+    const ramFree = hw.ram.usableGB;
+    const ramPct = Math.round((ramFree / ramTotal) * 100);
+
+    console.log(`  ${chalk.cyan('Physical Installed Memory:')}`);
     console.log(
-      `  ${chalk.gray('System RAM:')}   ${chalk.cyan(hw.ram.usableGB + ' GB')} usable / ${hw.ram.totalGB} GB total`
+      `    ${chalk.gray('• System RAM:')}   ${chalk.white.bold(ramTotal.toFixed(1) + ' GB')} installed`
+    );
+    console.log();
+    console.log(`  ${chalk.cyan('Live Available Memory (Ready for LLMs):')}`);
+    console.log(
+      `    ${chalk.gray('• System RAM:')}   ${chalk.green.bold(ramFree.toFixed(1) + ' GB')} available ${chalk.gray(`(${ramPct}% free)`)}`
     );
   }
+
+  // 3. Direct URL to WhichLLM Local Finder pre-filled with detected hardware
+  console.log();
+  console.log(chalk.bold.white('Explore all compatible models online:'));
+  console.log(chalk.cyan.underline(webUrl));
   console.log();
 }

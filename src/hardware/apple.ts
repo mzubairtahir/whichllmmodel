@@ -1,3 +1,4 @@
+import os from 'os';
 import { execSync } from 'child_process';
 import { MemoryMetric } from '../types.js';
 import { bytesToGB } from './memory.js';
@@ -43,8 +44,11 @@ export function detectAppleSilicon(): AppleSiliconInfo | null {
     const totalBytes = parseInt(memsizeStr, 10);
     if (isNaN(totalBytes) || totalBytes <= 0) return null;
 
-    // Standard 75% macOS VRAM allocation ceiling for Unified Memory
-    const usableBytes = Math.floor(totalBytes * 0.75);
+    // Apple Metal allocates up to 75% of unified memory for GPU workloads,
+    // capped by current live free memory to prevent disk swap
+    const metalCeilingBytes = Math.floor(totalBytes * 0.75);
+    const liveFreeBytes = os.freemem();
+    const usableBytes = Math.min(metalCeilingBytes, liveFreeBytes);
 
     return {
       chipName,

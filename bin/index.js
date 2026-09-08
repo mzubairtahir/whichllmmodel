@@ -5,8 +5,12 @@ import fs from "fs";
 import path from "path";
 import { Command } from "commander";
 
+// src/commands/profile.ts
+import chalk2 from "chalk";
+import { exec } from "child_process";
+
 // src/hardware/detector.ts
-import os2 from "os";
+import os3 from "os";
 import { execSync as execSync3 } from "child_process";
 
 // src/hardware/memory.ts
@@ -70,6 +74,7 @@ function detectNvidiaGpu() {
 }
 
 // src/hardware/apple.ts
+import os2 from "os";
 import { execSync as execSync2 } from "child_process";
 function detectAppleSilicon() {
   if (process.platform !== "darwin") return null;
@@ -96,7 +101,9 @@ function detectAppleSilicon() {
     }).trim();
     const totalBytes = parseInt(memsizeStr, 10);
     if (isNaN(totalBytes) || totalBytes <= 0) return null;
-    const usableBytes = Math.floor(totalBytes * 0.75);
+    const metalCeilingBytes = Math.floor(totalBytes * 0.75);
+    const liveFreeBytes = os2.freemem();
+    const usableBytes = Math.min(metalCeilingBytes, liveFreeBytes);
     return {
       chipName,
       unifiedMemory: {
@@ -132,7 +139,7 @@ function detectWindowsGpuName() {
 function detectHardware() {
   const platform = process.platform;
   const arch = process.arch;
-  const cpus = os2.cpus();
+  const cpus = os3.cpus();
   const cpuName = cpus.length > 0 ? cpus[0].model.trim() : "Unknown CPU";
   const ram = getSystemRam();
   const appleSilicon = detectAppleSilicon();
@@ -175,315 +182,149 @@ function detectHardware() {
 
 // src/ui/formatters.ts
 import chalk from "chalk";
-function formatHardwareSummaryLine(hw) {
-  const parts = [];
-  if (hw.type === "unified_memory" && hw.unifiedMemory) {
-    parts.push(chalk.bold(hw.name));
-    parts.push(
-      `${chalk.cyan(hw.unifiedMemory.usableGB + " GB")} usable unified memory / ${hw.unifiedMemory.totalGB} GB total`
-    );
-  } else if (hw.type === "gpu" && hw.vram) {
-    parts.push(chalk.bold(hw.name));
-    parts.push(
-      `${chalk.cyan(hw.vram.usableGB + " GB")} usable VRAM / ${hw.vram.totalGB} GB total`
-    );
-    parts.push(`${hw.ram.totalGB} GB RAM`);
-  } else {
-    parts.push(chalk.bold(hw.name));
-    parts.push(
-      `${chalk.cyan(hw.ram.usableGB + " GB")} usable / ${hw.ram.totalGB} GB RAM`
-    );
+
+// src/hardware/url.ts
+function getBaseFinderUrl(explicitUrl) {
+  if (explicitUrl) return explicitUrl;
+  if (process.env.WHICH_MODEL_WEB_URL) {
+    const val = process.env.WHICH_MODEL_WEB_URL.trim().replace(/\/+$/, "");
+    return val.includes("/app/text/local") ? val : `${val}/app/text/local`;
   }
-  return parts.join(" \u2022 ");
-}
-function formatFitBadge(fitTier) {
-  const lower = fitTier.toLowerCase();
-  if (lower === "optimal" || lower === "vram") {
-    return chalk.green("100% VRAM (Optimal)");
+  if (process.env.WHICH_MODEL_BASE_URL) {
+    const val = process.env.WHICH_MODEL_BASE_URL.trim().replace(/\/+$/, "");
+    return `${val}/app/text/local`;
   }
-  if (lower === "good") {
-    return chalk.green("Fits in VRAM");
-  }
-  if (lower === "tight") {
-    return chalk.yellow("Tight Fit (VRAM)");
-  }
-  if (lower === "offload" || lower === "cpu_offload") {
-    return chalk.yellow("CPU RAM Offload");
-  }
-  if (lower === "ram") {
-    return chalk.cyan("System RAM Only");
-  }
-  return chalk.red("Exceeds Memory");
-}
-function renderCleanRecommendations(recommendations) {
-  if (recommendations.length === 0) {
-    console.log(chalk.gray("No matching models found."));
-    return;
-  }
-  console.log(chalk.bold.white("Top Recommendations:"));
-  console.log();
-  for (const m of recommendations) {
-    const paramStr = m.parameters ? ` (${m.parameters})` : "";
-    console.log(
-      `  ${chalk.bold.cyan(m.rank + ".")} ${chalk.bold.white(m.name)}${chalk.gray(paramStr)}`
-    );
-    console.log(
-      `     ${chalk.gray("Quant:")}    ${chalk.yellow(m.recommendedQuant)} ` + chalk.gray(`(${m.memoryFootprint.totalRequiredGB} GB required)`)
-    );
-    console.log(`     ${chalk.gray("Fit:")}      ${formatFitBadge(m.fitTier)}`);
-    if (m.scores.coding !== void 0) {
-      console.log(`     ${chalk.gray("Score:")}    ${chalk.green.bold(m.scores.coding)} ${chalk.gray("(coding)")}`);
-    } else if (m.scores.overall !== void 0) {
-      console.log(`     ${chalk.gray("Score:")}    ${chalk.green.bold(m.scores.overall)} ${chalk.gray("(overall)")}`);
-    } else if (m.scores.reasoning !== void 0) {
-      console.log(`     ${chalk.gray("Score:")}    ${chalk.green.bold(m.scores.reasoning)} ${chalk.gray("(reasoning)")}`);
+  if (process.env.WHICH_MODEL_API_URL) {
+    try {
+      const parsed = new URL(process.env.WHICH_MODEL_API_URL.trim());
+      return `${parsed.origin}/app/text/local`;
+    } catch {
     }
-    console.log(`     ${chalk.gray("URL:")}      ${chalk.cyan.underline(m.websiteUrl)}`);
-    console.log();
   }
+  if (process.env.NODE_ENV === "development") {
+    return "http://localhost:3000/app/text/local";
+  }
+  return "https://www.whichllmmodel.com/app/text/local";
 }
-function renderCleanHardwareProfile(hw) {
-  console.log(chalk.bold.white("Hardware Profile:"));
-  console.log(`  ${chalk.gray("Device:")}       ${chalk.white.bold(hw.name)}`);
-  console.log(`  ${chalk.gray("CPU:")}          ${chalk.white(hw.cpuName)} ${chalk.gray(`(${hw.platform} ${hw.arch})`)}`);
+function buildWebFinderUrl(hw, options = {}) {
+  const baseUrl = getBaseFinderUrl(options.baseUrl);
+  const memoryMode = options.memoryMode || "available";
+  const params = new URLSearchParams();
   if (hw.type === "unified_memory" && hw.unifiedMemory) {
-    console.log(`  ${chalk.gray("Architecture:")} ${chalk.green("Apple Silicon Unified Memory")}`);
+    const memVal = memoryMode === "available" ? hw.unifiedMemory.usableGB : hw.unifiedMemory.totalGB;
+    params.set("unified_mem", memVal.toFixed(1));
+    params.set("memory_mode", memoryMode);
+  } else if (hw.type === "gpu" && hw.vram) {
+    const vramVal = memoryMode === "available" ? hw.vram.usableGB : hw.vram.totalGB;
+    const ramVal = memoryMode === "available" ? hw.ram.usableGB : hw.ram.totalGB;
+    params.set("vram", vramVal.toFixed(1));
+    params.set("ram", ramVal.toFixed(1));
+    params.set("memory_mode", memoryMode);
+  } else {
+    const ramVal = memoryMode === "available" ? hw.ram.usableGB : hw.ram.totalGB;
+    params.set("vram", "0");
+    params.set("ram", ramVal.toFixed(1));
+    params.set("memory_mode", memoryMode);
+  }
+  return `${baseUrl}?${params.toString()}`;
+}
+
+// src/ui/formatters.ts
+function renderCleanHardwareProfile(hw) {
+  const webUrl = buildWebFinderUrl(hw, { memoryMode: "available" });
+  console.log();
+  console.log(
+    `${chalk.bold.hex("#6366F1")("whichllmmodel")} \u2022 ${chalk.bold.white("Hardware & Memory Profiler")}`
+  );
+  console.log();
+  console.log(chalk.bold.white("Hardware Detected:"));
+  console.log(`  ${chalk.gray("\u2022 Device:")}         ${chalk.white.bold(hw.name)}`);
+  console.log(
+    `  ${chalk.gray("\u2022 CPU:")}            ${chalk.white(hw.cpuName)} ${chalk.gray(`(${hw.platform} ${hw.arch})`)}`
+  );
+  let archDesc = chalk.yellow("CPU / System RAM Mode (No discrete GPU detected)");
+  if (hw.type === "unified_memory") {
+    archDesc = chalk.green("Apple Silicon (Unified Memory)");
+  } else if (hw.type === "gpu") {
+    archDesc = chalk.green("Discrete GPU");
+  }
+  console.log(`  ${chalk.gray("\u2022 Architecture:")}   ${archDesc}`);
+  console.log();
+  console.log(chalk.bold.white("Memory Breakdown:"));
+  if (hw.type === "unified_memory" && hw.unifiedMemory) {
+    const totalGB = hw.unifiedMemory.totalGB;
+    const usableGB = hw.unifiedMemory.usableGB;
+    const pct = Math.round(usableGB / totalGB * 100);
+    console.log(`  ${chalk.cyan("Physical Installed Memory:")}`);
     console.log(
-      `  ${chalk.gray("Memory:")}        ${chalk.cyan(hw.unifiedMemory.usableGB + " GB")} usable / ${hw.unifiedMemory.totalGB} GB total (75% macOS VRAM ceiling)`
+      `    ${chalk.gray("\u2022 Unified Memory:")} ${chalk.white.bold(totalGB.toFixed(1) + " GB")} installed`
+    );
+    console.log();
+    console.log(`  ${chalk.cyan("Live Available Memory (Metal VRAM Budget):")}`);
+    console.log(
+      `    ${chalk.gray("\u2022 Unified Memory:")} ${chalk.green.bold(usableGB.toFixed(1) + " GB")} allocatable ${chalk.gray(`(75% macOS ceiling, ~${pct}% available)`)}`
+    );
+    console.log(
+      `    ${chalk.gray("\u2022 Free Host RAM:")}  ${chalk.white.bold(hw.ram.usableGB.toFixed(1) + " GB")} free right now`
     );
   } else if (hw.type === "gpu" && hw.vram) {
-    console.log(`  ${chalk.gray("Architecture:")} ${chalk.green("Discrete GPU")}`);
+    const vramTotal = hw.vram.totalGB;
+    const vramFree = hw.vram.usableGB;
+    const vramPct = Math.round(vramFree / vramTotal * 100);
+    const ramTotal = hw.ram.totalGB;
+    const ramFree = hw.ram.usableGB;
+    const ramPct = Math.round(ramFree / ramTotal * 100);
+    console.log(`  ${chalk.cyan("Physical Installed Memory:")}`);
     console.log(
-      `  ${chalk.gray("GPU VRAM:")}     ${chalk.cyan(hw.vram.usableGB + " GB")} usable / ${hw.vram.totalGB} GB total`
+      `    ${chalk.gray("\u2022 GPU VRAM:")}     ${chalk.white.bold(vramTotal.toFixed(1) + " GB")} installed`
     );
     console.log(
-      `  ${chalk.gray("System RAM:")}   ${chalk.cyan(hw.ram.usableGB + " GB")} usable / ${hw.ram.totalGB} GB total`
+      `    ${chalk.gray("\u2022 System RAM:")}   ${chalk.white.bold(ramTotal.toFixed(1) + " GB")} installed`
+    );
+    console.log();
+    console.log(`  ${chalk.cyan("Live Available Memory (Ready for LLMs):")}`);
+    console.log(
+      `    ${chalk.gray("\u2022 GPU VRAM:")}     ${chalk.green.bold(vramFree.toFixed(1) + " GB")} available ${chalk.gray(`(${vramPct}% free)`)}`
+    );
+    console.log(
+      `    ${chalk.gray("\u2022 System RAM:")}   ${chalk.green.bold(ramFree.toFixed(1) + " GB")} available ${chalk.gray(`(${ramPct}% free)`)}`
     );
   } else {
-    console.log(`  ${chalk.gray("Architecture:")} ${chalk.yellow("CPU / System RAM Mode")} ${chalk.gray("(No discrete GPU detected)")}`);
+    const ramTotal = hw.ram.totalGB;
+    const ramFree = hw.ram.usableGB;
+    const ramPct = Math.round(ramFree / ramTotal * 100);
+    console.log(`  ${chalk.cyan("Physical Installed Memory:")}`);
     console.log(
-      `  ${chalk.gray("System RAM:")}   ${chalk.cyan(hw.ram.usableGB + " GB")} usable / ${hw.ram.totalGB} GB total`
+      `    ${chalk.gray("\u2022 System RAM:")}   ${chalk.white.bold(ramTotal.toFixed(1) + " GB")} installed`
+    );
+    console.log();
+    console.log(`  ${chalk.cyan("Live Available Memory (Ready for LLMs):")}`);
+    console.log(
+      `    ${chalk.gray("\u2022 System RAM:")}   ${chalk.green.bold(ramFree.toFixed(1) + " GB")} available ${chalk.gray(`(${ramPct}% free)`)}`
     );
   }
+  console.log();
+  console.log(chalk.bold.white("Explore all compatible models online:"));
+  console.log(chalk.cyan.underline(webUrl));
   console.log();
 }
 
 // src/commands/profile.ts
-function profileCommand() {
-  const hw = detectHardware();
-  renderCleanHardwareProfile(hw);
-}
-
-// src/commands/recommend.ts
-import ora from "ora";
-import chalk2 from "chalk";
-
-// src/api/normalizer.ts
-function normalizeRawModel(raw, index) {
-  const rank = raw.rank || index + 1;
-  const id = raw.id || raw.slug || `model-${rank}`;
-  const name = raw.name || id;
-  const provider = raw.creator || raw.provider || "AI";
-  const parameters = raw.parameters || (raw.parametersInB ? `${raw.parametersInB}B` : "");
-  let recommendedQuant = "Q4_K_M";
-  if (typeof raw.recommendedQuant === "string") {
-    recommendedQuant = raw.recommendedQuant;
-  } else if (raw.recommendedQuant && typeof raw.recommendedQuant === "object") {
-    recommendedQuant = raw.recommendedQuant.format || "Q4_K_M";
-  }
-  const weightsGB = raw.memoryFootprint?.modelWeightsGB ?? raw.recommendedQuant?.weightsMemoryGB ?? raw.recommendedQuant?.fileSizeBytesGb ?? 0;
-  const kvCacheGB = raw.memoryFootprint?.kvCacheGB ?? raw.recommendedQuant?.kvCacheMemoryGB ?? 0;
-  const overheadGB = raw.memoryFootprint?.overheadGB ?? 0.5;
-  const totalRequiredGB = raw.memoryFootprint?.totalRequiredGB ?? raw.recommendedQuant?.totalRequiredMemoryGB ?? Number((weightsGB + kvCacheGB + overheadGB).toFixed(1));
-  const headroomGB = raw.memoryFootprint?.headroomGB;
-  let fitTier = "good";
-  if (raw.fitTier) {
-    fitTier = raw.fitTier;
-  } else if (raw.recommendedQuant?.fitStatus) {
-    fitTier = raw.recommendedQuant.fitStatus;
-  }
-  const scores = {};
-  if (raw.scores && typeof raw.scores === "object") {
-    scores.overall = raw.scores.overall;
-    scores.coding = raw.scores.coding;
-    scores.reasoning = raw.scores.reasoning;
-    scores.mmlu = raw.scores.mmlu;
-    scores.math = raw.scores.math;
-  } else if (raw.benchmark && typeof raw.benchmark === "object") {
-    if (raw.benchmark.category === "coding") scores.coding = raw.benchmark.score;
-    else if (raw.benchmark.category === "reasoning") scores.reasoning = raw.benchmark.score;
-    else scores.overall = raw.benchmark.score;
-  }
-  const quantOptions = [];
-  const rawQuants = raw.quantOptions || raw.availableQuants || [];
-  for (const q of rawQuants) {
-    quantOptions.push({
-      quant: q.quant || q.format || "Q4_K_M",
-      vramRequiredGB: q.vramRequiredGB ?? q.totalRequiredMemoryGB ?? 0,
-      qualityRetention: q.qualityRetention,
-      fits: q.fits ?? q.fitsInVram ?? q.fitStatus === "vram",
-      downloadUrl: q.downloadUrl
-    });
-  }
-  const ollamaCommand = raw.ollamaCommand || null;
-  const modelId = raw.id || raw.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const websiteUrl = raw.websiteUrl && raw.websiteUrl.includes("whichllmmodel.com/models/") ? raw.websiteUrl : `https://www.whichllmmodel.com/models/${modelId}`;
-  const huggingfaceUrl = raw.huggingfaceUrl || null;
-  return {
-    rank,
-    id,
-    name,
-    provider,
-    parameters,
-    recommendedQuant,
-    fitTier,
-    fitMessage: raw.fitMessage,
-    memoryFootprint: {
-      weightsGB,
-      kvCacheGB,
-      overheadGB,
-      totalRequiredGB,
-      headroomGB
-    },
-    scores,
-    quantOptions,
-    ollamaCommand,
-    websiteUrl,
-    huggingfaceUrl,
-    description: raw.description,
-    tags: raw.tags
-  };
-}
-
-// src/api/client.ts
-var PRODUCTION_API_URL = "https://www.whichllmmodel.com/api/cli/recommend";
-async function fetchRecommendations(hardware, context = "32k", cpuOffload = true, sortBy = "largest_vram") {
-  const apiUrl = process.env.WHICH_MODEL_API_URL || PRODUCTION_API_URL;
-  const effectiveCpuOffload = hardware.type === "unified_memory" ? false : cpuOffload;
-  const payload = {
-    hardwareType: hardware.type,
-    name: hardware.name,
-    totalUnifiedMemoryGB: hardware.unifiedMemory ? hardware.unifiedMemory.totalGB : null,
-    usableUnifiedMemoryGB: hardware.unifiedMemory ? hardware.unifiedMemory.usableGB : null,
-    totalVramGB: hardware.vram ? hardware.vram.totalGB : null,
-    usableVramGB: hardware.vram ? hardware.vram.usableGB : null,
-    totalRamGB: hardware.ram.totalGB,
-    usableRamGB: hardware.ram.usableGB,
-    context,
-    cpuOffload: effectiveCpuOffload,
-    sortBy
-  };
+function openBrowser(url) {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6e3);
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "whichllmmodel-cli/1.0.0",
-        Accept: "application/json"
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    if (response.ok) {
-      const rawData = await response.json();
-      if (rawData && Array.isArray(rawData.recommendations)) {
-        const normalized = rawData.recommendations.map(normalizeRawModel);
-        return {
-          success: true,
-          recommendations: normalized.slice(0, 3),
-          sourceUrl: apiUrl,
-          payload
-        };
-      }
-    }
-    return {
-      success: false,
-      recommendations: [],
-      error: `Server responded with ${response.status} ${response.statusText}`,
-      sourceUrl: apiUrl,
-      payload
-    };
-  } catch (err) {
-    return {
-      success: false,
-      recommendations: [],
-      error: err.message || "Connection failed",
-      sourceUrl: apiUrl,
-      payload
-    };
+    const cmd = process.platform === "darwin" ? `open "${url}"` : process.platform === "win32" ? `start "" "${url}"` : `xdg-open "${url}"`;
+    exec(cmd);
+  } catch {
   }
 }
-
-// src/types.ts
-var SORT_STRATEGY_LABELS = {
-  largest_vram: "largest-vram",
-  top_coding: "coding",
-  highest_params: "high-params",
-  highest_quality: "high-quant"
-};
-function normalizeSortStrategy(input) {
-  if (!input) return "largest_vram";
-  const val = input.toLowerCase().trim().replace(/_/g, "-");
-  switch (val) {
-    case "coding":
-      return "top_coding";
-    case "high-params":
-    case "highest-params":
-    case "params":
-      return "highest_params";
-    case "high-quant":
-    case "highest-quant":
-    case "quant":
-      return "highest_quality";
-    case "largest-vram":
-    case "vram":
-    default:
-      return "largest_vram";
-  }
-}
-
-// src/commands/recommend.ts
-async function recommendCommand(options = {}) {
-  const context = options.context || "32k";
-  const cpuOffload = options.cpuOffload ?? true;
-  const sortBy = normalizeSortStrategy(options.sort);
+function profileCommand(options = {}) {
   const hardware = detectHardware();
-  console.log();
-  console.log(
-    `${chalk2.bold.hex("#6366F1")("whichllmmodel")} \u2022 ${formatHardwareSummaryLine(hardware)}`
-  );
-  console.log(
-    chalk2.gray(
-      `Context: ${chalk2.white(context)} \u2022 CPU Offload: ${hardware.type === "unified_memory" ? "N/A" : cpuOffload ? "Enabled" : "Disabled"} \u2022 Sorted by: ${chalk2.white(SORT_STRATEGY_LABELS[sortBy])}`
-    )
-  );
-  console.log();
-  const spinner = ora({
-    text: "Finding optimal models...",
-    color: "cyan"
-  }).start();
-  const result = await fetchRecommendations(
-    hardware,
-    context,
-    cpuOffload,
-    sortBy
-  );
-  spinner.stop();
-  if (!result.success) {
-    console.log(chalk2.yellow("\u2715 Server is currently not responding."));
-    console.log(
-      chalk2.gray(
-        `  Unable to reach recommendation service (${result.sourceUrl || "https://www.whichllmmodel.com/api/cli/recommend"}).`
-      )
-    );
-    console.log(chalk2.gray("  Please check your connection or try again shortly."));
-    console.log();
-    return;
+  renderCleanHardwareProfile(hardware);
+  if (options.open) {
+    const webUrl = buildWebFinderUrl(hardware, { memoryMode: "available" });
+    console.log(chalk2.gray("Opening WhichLLM Local Finder in browser..."));
+    openBrowser(webUrl);
   }
-  renderCleanRecommendations(result.recommendations);
 }
 
 // src/index.ts
@@ -510,30 +351,9 @@ function loadDotenv() {
 }
 loadDotenv();
 var program = new Command();
-program.name("whichllmmodel").description("Hardware-aware CLI for recommending and running local LLMs").version("1.0.0");
-program.command("profile").description(
-  "Inspect and display local hardware (name, architecture, total vs usable memory)"
-).action(() => {
-  profileCommand();
-});
-program.command("recommend", { isDefault: true }).alias("rec").description(
-  "Recommend top 3 local LLMs matching hardware, context, and sorting"
-).option("-c, --context <size>", "Context window size (e.g. 8k, 32k, 128k)", "32k").option(
-  "--cpu-offload",
-  "Enable CPU RAM offloading for discrete GPUs (default: true)",
-  true
-).option(
-  "--no-cpu-offload",
-  "Disable CPU RAM offloading (strictly require GPU VRAM fit)"
-).option(
-  "-s, --sort <mode>",
-  'Sort strategy: largest-vram, coding, high-params, high-quant (default: "largest-vram")',
-  "largest-vram"
-).action(async (options) => {
-  await recommendCommand({
-    context: options.context,
-    cpuOffload: options.cpuOffload,
-    sort: options.sort
+program.name("whichllmmodel").description("Hardware & Memory Profiler for WhichLLM Local Finder").version("1.0.1").option("-o, --open", "Open the WhichLLM Local Finder pre-filled URL directly in your browser").action((options) => {
+  profileCommand({
+    open: options.open
   });
 });
 program.parse(process.argv);
