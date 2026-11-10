@@ -1,0 +1,22 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+
+# Local model & cache files
+*.part
+*.tmp
+local_models_meta.json
+download_status.json
+session_skeletons/
+downloaded_models/
+
+# OS and Editor
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+

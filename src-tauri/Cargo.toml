@@ -1,0 +1,17 @@
+[package]
+name = "whichllmmodel"
+version = "1.0.0"
+description = "whichllmmodel - Zero-Download Hardware Simulator Desktop App"
+authors = ["whichllmmodel"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+dirs = "5"
+
