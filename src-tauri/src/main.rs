@@ -1,19 +1,29 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod downloader;
+mod gguf;
+mod hf;
+mod hw;
+mod scanner;
+
+use downloader::DownloadStatus;
+use hw::HardwareInfo;
 use regex::Regex;
+use scanner::LocalModelEntry;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn get_app_data_dir() -> PathBuf {
-    if let Some(mut local_app) = dirs::data_local_dir() {
+    if let Some(local_app) = dirs::data_local_dir() {
         let app_dir = local_app.join("whichllmmodel");
         let _ = std::fs::create_dir_all(&app_dir);
         return app_dir;
@@ -48,114 +58,6 @@ fn get_bin_dir() -> PathBuf {
     PathBuf::from(r"e:\llama.cpp study\llama.cpp\build\bin\Release")
 }
 
-#[repr(C)]
-struct MEMORYSTATUSEX {
-    dw_length: u32,
-    dw_memory_load: u32,
-    ull_total_phys: u64,
-    ull_avail_phys: u64,
-    ull_total_page_file: u64,
-    ull_avail_page_file: u64,
-    ull_total_virtual: u64,
-    ull_avail_virtual: u64,
-    ull_avail_extended_virtual: u64,
-}
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn GlobalMemoryStatusEx(lp_buffer: *mut MEMORYSTATUSEX) -> i32;
-}
-
-fn refresh_live_ram_ffi(hw: &mut HardwareInfo) {
-    unsafe {
-        let mut stat: MEMORYSTATUSEX = std::mem::zeroed();
-        stat.dw_length = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-        if GlobalMemoryStatusEx(&mut stat) != 0 {
-            let total_mib = (stat.ull_total_phys as f64) / (1024.0 * 1024.0);
-            let free_mib = (stat.ull_avail_phys as f64) / (1024.0 * 1024.0);
-            hw.ram_total_mib = (total_mib * 10.0).round() / 10.0;
-            hw.ram_free_mib = (free_mib * 10.0).round() / 10.0;
-            hw.ram_used_mib = ((total_mib - free_mib).max(0.0) * 10.0).round() / 10.0;
-            hw.ram_load_pct = stat.dw_memory_load;
-            hw.gpu_shared_ram_mib = ((total_mib * 0.5) * 10.0).round() / 10.0;
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone, Default)]
-struct HardwareInfo {
-    cpu_name: String,
-    cpu_threads: u32,
-    cpu_mhz: u32,
-    ram_total_mib: f64,
-    ram_free_mib: f64,
-    ram_used_mib: f64,
-    ram_load_pct: u32,
-    ram_installed_gb: u32,
-    ram_channels: u32,
-    ram_speed_mts: u32,
-    ram_bandwidth_gbs: f64,
-    #[serde(default)]
-    measured_ram_gbs: f64,
-    #[serde(default)]
-    effective_ram_gbs: f64,
-    gpu_name: String,
-    gpu_is_discrete: bool,
-    gpu_vram_total_mib: f64,
-    gpu_vram_free_mib: f64,
-    gpu_shared_ram_mib: f64,
-    gpu_bandwidth_gbs: f64,
-    #[serde(default)]
-    measured_gpu_gbs: f64,
-    #[serde(default)]
-    effective_gpu_gbs: f64,
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-struct LocalModelEntry {
-    name: String,
-    source: String,
-    model_path: String,
-    mmproj_path: String,
-    arch: String,
-    context_length: u32,
-    is_moe: bool,
-    expert_count: u32,
-    expert_used_count: u32,
-    model_logical_mib: f64,
-    model_disk_mib: f64,
-    mmproj_logical_mib: f64,
-    mmproj_disk_mib: f64,
-    is_sparse_skeleton: bool,
-    #[serde(default)]
-    bookmarked: bool,
-    #[serde(default)]
-    category: String,
-}
-
-#[derive(Deserialize, Serialize, Clone, Default)]
-struct DownloadStatus {
-    #[serde(default)]
-    active: bool,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    filename: String,
-    #[serde(default)]
-    url: String,
-    #[serde(default)]
-    downloaded_mib: f64,
-    #[serde(default)]
-    total_mib: f64,
-    #[serde(default)]
-    percent: f64,
-    #[serde(default)]
-    speed_mbs: f64,
-    #[serde(default)]
-    output_path: String,
-    error: Option<String>,
-}
-
 #[derive(Deserialize, Serialize, Clone, Default)]
 struct ModelUserMeta {
     #[serde(default)]
@@ -164,15 +66,13 @@ struct ModelUserMeta {
     category: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Clone, Debug)]
 struct HelperResponse {
     ok: bool,
     error: Option<String>,
     skeleton_path: Option<String>,
     resolved_url: Option<String>,
-    #[serde(default)]
     is_local: Option<bool>,
-    #[serde(default)]
     prep_time_ms: Option<f64>,
     arch: Option<String>,
     arch_supported: Option<bool>,
@@ -183,7 +83,6 @@ struct HelperResponse {
     expert_used_count: Option<u32>,
     mmproj_skeleton_path: Option<String>,
     hardware: Option<HardwareInfo>,
-    local_models: Option<Vec<LocalModelEntry>>,
 }
 
 #[derive(Clone)]
@@ -201,7 +100,159 @@ struct CachedVision {
 static HELPER_CACHE: OnceLock<Mutex<HashMap<(String, String), HelperResponse>>> = OnceLock::new();
 static VISION_CACHE: OnceLock<Mutex<HashMap<(String, String), CachedVision>>> = OnceLock::new();
 static HW_CACHE: OnceLock<Mutex<Option<HardwareInfo>>> = OnceLock::new();
-static DOWNLOAD_CHILD: OnceLock<Mutex<Option<std::process::Child>>> = OnceLock::new();
+static DOWNLOAD_CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+fn resolve_local_gguf_path(input_path: &str) -> Result<PathBuf, String> {
+    let p = Path::new(input_path);
+    if p.is_file() {
+        return Ok(p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    }
+    if p.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(p) {
+            let mut ggufs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|f| {
+                    f.is_file()
+                        && f.extension()
+                            .map(|ext| ext.eq_ignore_ascii_case("gguf"))
+                            .unwrap_or(false)
+                })
+                .collect();
+            ggufs.sort();
+            if let Some(first) = ggufs.into_iter().next() {
+                return Ok(first.canonicalize().unwrap_or_else(|_| first));
+            }
+        }
+    }
+    Err(format!("Could not find a valid .gguf file at: {}", input_path))
+}
+
+fn get_llama_cpp_supported_archs() -> HashSet<String> {
+    let mut supported = HashSet::new();
+    for arch in &[
+        "llama", "falcon", "grok", "gpt2", "gptj", "gptneox", "mpt", "baichuan",
+        "starcoder", "refact", "bert", "nomic-bert", "jina-bert-v2", "bloom", "stablelm",
+        "qwen", "qwen2", "qwen2moe", "qwen2vl", "phi2", "phi3", "plamo", "codeshell",
+        "orion", "internlm2", "minicpm", "minicpm3", "gemma", "gemma2", "gemma3", "starcoder2",
+        "mamba", "xverse", "command-r", "dbrx", "olmo", "olmo2", "openelm", "arctic",
+        "deepseek", "deepseek2", "chatglm", "bitnet", "t5", "t5encoder", "jais", "nemotron",
+        "exaone", "rwkv6", "granite", "granite-moe", "chameleon", "wavtokenizer", "whisper",
+    ] {
+        supported.insert(arch.to_string());
+    }
+
+    let bin_dir = get_bin_dir();
+    let arch_cpp_candidates = [
+        bin_dir.join("..").join("llama.cpp").join("src").join("llama-arch.cpp"),
+        PathBuf::from(r"e:\llama.cpp study\llama.cpp\src\llama-arch.cpp"),
+    ];
+    for cand in &arch_cpp_candidates {
+        if cand.is_file() {
+            if let Ok(content) = std::fs::read_to_string(cand) {
+                let re = Regex::new(r#"\{\s*LLM_ARCH_[A-Z0-9_]+\s*,\s*"([^"]+)"\s*\}"#).unwrap();
+                for cap in re.captures_iter(&content) {
+                    let name = cap[1].trim();
+                    if !name.is_empty() && name != "(unknown)" {
+                        supported.insert(name.to_string());
+                    }
+                }
+                break;
+            }
+        }
+    }
+    supported
+}
+
+fn prepare_model_native(url_or_path: &str, mmproj_arg: &str) -> Result<HelperResponse, String> {
+    let t0 = Instant::now();
+    let is_already_local = Path::new(url_or_path).exists();
+    let session_dir = std::env::temp_dir().join("whichllmmodel").join("session_skeletons");
+    let _ = std::fs::create_dir_all(&session_dir);
+
+    // 1. Resolve / download main model skeleton
+    let (skeleton_path_buf, resolved_url) = if is_already_local {
+        let local_path = resolve_local_gguf_path(url_or_path)?;
+        (local_path, url_or_path.to_string())
+    } else {
+        let res_url = hf::resolve_target_to_gguf_url(url_or_path)?;
+        if Path::new(&res_url).exists() {
+            let local_path = resolve_local_gguf_path(&res_url)?;
+            (local_path, res_url)
+        } else {
+            let skel = gguf::create_model_skeleton(&res_url, &session_dir)?;
+            (skel, res_url)
+        }
+    };
+
+    // 2. Inspect GGUF metadata
+    let meta = gguf::inspect_file(&skeleton_path_buf)?;
+    let arch = meta.arch;
+    let context_length = meta.context_length;
+    let is_moe = meta.is_moe;
+    let expert_count = meta.expert_count;
+    let expert_used_count = meta.expert_used_count;
+
+    // 3. Architecture check
+    let supported = get_llama_cpp_supported_archs();
+    let arch_supported = supported.contains(&arch) || supported.is_empty();
+    let supported_arch_count = supported.len();
+
+    // 4. Resolve or auto-detect optional Vision Projector (mmproj)
+    let mut mmproj_skeleton_path = String::new();
+    let clean_mm = mmproj_arg.trim();
+    if !clean_mm.is_empty() {
+        if Path::new(clean_mm).exists() {
+            if let Ok(p) = resolve_local_gguf_path(clean_mm) {
+                mmproj_skeleton_path = p.to_string_lossy().to_string();
+            }
+        } else {
+            let mm_url = if clean_mm.ends_with(".gguf")
+                && (clean_mm.starts_with("http://") || clean_mm.starts_with("https://"))
+            {
+                clean_mm.replace("/blob/", "/resolve/")
+            } else if let Some(auto) = hf::find_mmproj_in_hf_repo(clean_mm) {
+                auto
+            } else {
+                hf::resolve_target_to_gguf_url(clean_mm).unwrap_or_default()
+            };
+
+            if !mm_url.is_empty() {
+                if let Ok(skel) = gguf::create_model_skeleton(&mm_url, &session_dir) {
+                    mmproj_skeleton_path = skel.to_string_lossy().to_string();
+                }
+            }
+        }
+    } else if !is_already_local {
+        // Auto-detect vision projector if HF repo contains mmproj-*.gguf
+        if let Some(auto_mm) = hf::find_mmproj_in_hf_repo(url_or_path) {
+            if let Ok(skel) = gguf::create_model_skeleton(&auto_mm, &session_dir) {
+                mmproj_skeleton_path = skel.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    let prep_time_ms = ((t0.elapsed().as_secs_f64() * 1000.0) * 10.0).round() / 10.0;
+    let hw = hw::detect_system_hardware();
+
+    Ok(HelperResponse {
+        ok: true,
+        error: None,
+        skeleton_path: Some(skeleton_path_buf.to_string_lossy().to_string()),
+        resolved_url: Some(resolved_url),
+        is_local: Some(is_already_local),
+        prep_time_ms: Some(prep_time_ms),
+        arch: Some(arch),
+        arch_supported: Some(arch_supported),
+        supported_arch_count: Some(supported_arch_count),
+        context_length: Some(context_length),
+        is_moe: Some(is_moe),
+        expert_count: Some(expert_count),
+        expert_used_count: Some(expert_used_count),
+        mmproj_skeleton_path: Some(mmproj_skeleton_path),
+        hardware: Some(hw),
+    })
+}
 
 #[derive(Deserialize)]
 struct IsolatedVisionBuf {
@@ -265,7 +316,6 @@ fn run_analyze_blocking(
     let mmproj_arg = mmproj_url_or_path.unwrap_or_default().trim().to_string();
 
     let bin_dir = get_bin_dir();
-    let helper_py = bin_dir.join("desktop_helper.py");
     let bench_exe = bin_dir.join("llama-bench.exe");
     let isolated_exe = bin_dir.join("isolated-reserve.exe");
 
@@ -273,7 +323,7 @@ fn run_analyze_blocking(
         return Err(format!("llama-bench.exe not found at {:?}", bench_exe));
     }
 
-    // Step 1: Resolve HF URL (or local path), create GGUF skeleton(s), and verify llama.cpp architecture support (cached in memory after 1st run)
+    // Step 1: Native zero-download GGUF preparation (cached in memory after 1st run)
     let cache_map = HELPER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let cache_key = (url_or_path.clone(), mmproj_arg.clone());
     let cached_entry = cache_map.lock().unwrap().get(&cache_key).cloned();
@@ -281,47 +331,16 @@ fn run_analyze_blocking(
     let mut helper_data = if let Some(cached) = cached_entry {
         cached
     } else {
-        let helper_out = Command::new("py")
-            .args(["-3.11", helper_py.to_str().unwrap(), &url_or_path, &mmproj_arg])
-            .current_dir(&bin_dir)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("Failed to invoke desktop_helper.py: {}", e))?;
-
-        let helper_stdout = String::from_utf8_lossy(&helper_out.stdout);
-        let helper_stderr = String::from_utf8_lossy(&helper_out.stderr);
-
-        let mut parsed_helper: Option<HelperResponse> = None;
-        for line in helper_stdout.lines().rev() {
-            if let Some(json_str) = line.strip_prefix("JSON_RESULT:") {
-                if let Ok(resp) = serde_json::from_str::<HelperResponse>(json_str) {
-                    parsed_helper = Some(resp);
-                    break;
-                }
-            }
-        }
-
-        let data = match parsed_helper {
-            Some(d) => d,
-            None => {
-                return Err(format!(
-                    "Failed to resolve GGUF / create skeleton:\n{}\n{}",
-                    helper_stdout, helper_stderr
-                ));
-            }
-        };
-
-        if data.ok {
-            cache_map.lock().unwrap().insert(cache_key, data.clone());
-            if let Some(ref hw) = data.hardware {
-                *HW_CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hw.clone());
-            }
+        let data = prepare_model_native(&url_or_path, &mmproj_arg)?;
+        cache_map.lock().unwrap().insert(cache_key, data.clone());
+        if let Some(ref hw) = data.hardware {
+            *HW_CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hw.clone());
         }
         data
     };
 
     if let Some(ref mut hw) = helper_data.hardware {
-        refresh_live_ram_ffi(hw);
+        hw::refresh_live_ram_ffi(hw);
     }
 
     if !helper_data.ok {
@@ -358,51 +377,41 @@ fn run_analyze_blocking(
         .args([
             "-m",
             &target_gguf,
-            "-v",
-            "-r",
-            "0",
-            "--no-warmup",
-            "-p",
-            &context_size.to_string(),
             "-n",
             "0",
-            "-ub",
-            "512",
-            "-b",
-            "512",
-            "-dev",
-            &device,
+            "-r",
+            "0",
+            "-p",
+            "0",
+            "-c",
+            &context_size.to_string(),
             "-ngl",
             &ngl.to_string(),
-            "-ncmoe",
-            &ncmoe_val.to_string(),
-            "-fa",
-            "on",
-            "--repack",
-            "0",
         ])
+        .current_dir(&bin_dir)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to execute llama-bench: {}", e))?;
 
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let bench_time_ms = ((bench_start.elapsed().as_secs_f64() * 1000.0) * 10.0).round() / 10.0;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if combined.contains("unknown model architecture") {
-        return Err(format!(
-            "llama-bench rejected architecture '{}': unknown model architecture in binary.",
-            arch
-        ));
-    }
-
-    // Step 3: Parse exact buffer lines directly from llama-bench output
-    let re_buf = Regex::new(
-        r"(load_tensors|llama_context|llama_kv_cache|llama_memory_recurrent|sched_reserve):\s+(\S+)\s+(model|output|KV|RS|compute) buffer size\s*=\s*([\d\.]+)\s*MiB",
-    )
-    .unwrap();
+    // Step 3: Exact Memory Extraction from llama.cpp logs
+    let combined_logs = format!("{}\n{}", stdout, stderr);
+    let raw_lines: Vec<String> = combined_logs
+        .lines()
+        .filter(|l| {
+            l.contains("load_tensors:")
+                || l.contains("init_kv:")
+                || l.contains("init_rs:")
+                || l.contains("init_compute:")
+                || l.contains("print_device_info:")
+                || l.contains("failed")
+                || l.contains("error")
+        })
+        .map(|s| s.to_string())
+        .collect();
 
     let mut vram_model_mib = 0.0;
     let mut ram_model_mib = 0.0;
@@ -413,67 +422,74 @@ fn run_analyze_blocking(
     let mut vram_compute_mib = 0.0;
     let mut ram_compute_mib = 0.0;
     let mut output_buffer_mib = 0.0;
-    let mut raw_lines = Vec::new();
 
-    for line in combined.lines() {
-        if line.contains("buffer size =") {
-            raw_lines.push(line.trim().to_string());
+    let re_model = Regex::new(r"model size\s*=\s*([0-9.]+)\s*MiB").unwrap();
+    let re_model_dev = Regex::new(r"([A-Za-z0-9_-]+)\s+model buffer size\s*=\s*([0-9.]+)\s*MiB").unwrap();
+    let re_kv_split = Regex::new(r"([A-Za-z0-9_-]+)\s+KV buffer size\s*=\s*([0-9.]+)\s*MiB").unwrap();
+    let re_rs_split = Regex::new(r"([A-Za-z0-9_-]+)\s+recurrent state buffer size\s*=\s*([0-9.]+)\s*MiB").unwrap();
+    let re_compute = Regex::new(r"([A-Za-z0-9_-]+)\s+compute buffer size\s*=\s*([0-9.]+)\s*MiB").unwrap();
+    let re_out_buf = Regex::new(r"output buffer size\s*=\s*([0-9.]+)\s*MiB").unwrap();
+
+    let is_gpu = |dev: &str| {
+        let d = dev.to_lowercase();
+        d.contains("cuda") || d.contains("metal") || d.contains("vulkan") || d.contains("kompute") || d.contains("sycl")
+    };
+
+    let mut total_model_size_mib = 0.0;
+    for line in combined_logs.lines() {
+        if let Some(caps) = re_model.captures(line) {
+            total_model_size_mib = caps[1].parse::<f64>().unwrap_or(0.0);
         }
-        if let Some(caps) = re_buf.captures(line) {
-            let backend = &caps[2];
-            let kind = &caps[3];
-            let val: f64 = caps[4].parse().unwrap_or(0.0);
-            let is_gpu = backend.starts_with("CUDA0")
-                || backend.starts_with("Metal")
-                || backend.starts_with("ROCm")
-                || backend.starts_with("Vulkan");
-
-            match kind {
-                "model" => {
-                    if is_gpu {
-                        vram_model_mib += val;
-                    } else {
-                        ram_model_mib += val;
-                    }
-                }
-                "KV" => {
-                    if is_gpu {
-                        vram_kv_mib += val;
-                    } else {
-                        ram_kv_mib += val;
-                    }
-                }
-                "RS" => {
-                    if is_gpu {
-                        vram_rs_mib += val;
-                    } else {
-                        ram_rs_mib += val;
-                    }
-                }
-                "compute" => {
-                    if is_gpu {
-                        vram_compute_mib = val;
-                    } else {
-                        ram_compute_mib = val;
-                    }
-                }
-                "output" => {
-                    output_buffer_mib += val;
-                }
-                _ => {}
+        for caps in re_model_dev.captures_iter(line) {
+            let dev = &caps[1];
+            let val = caps[2].parse::<f64>().unwrap_or(0.0);
+            if is_gpu(dev) {
+                vram_model_mib += val;
+            } else {
+                ram_model_mib += val;
             }
         }
+        for caps in re_kv_split.captures_iter(line) {
+            let dev = &caps[1];
+            let val = caps[2].parse::<f64>().unwrap_or(0.0);
+            if is_gpu(dev) {
+                vram_kv_mib += val;
+            } else {
+                ram_kv_mib += val;
+            }
+        }
+        for caps in re_rs_split.captures_iter(line) {
+            let dev = &caps[1];
+            let val = caps[2].parse::<f64>().unwrap_or(0.0);
+            if is_gpu(dev) {
+                vram_rs_mib += val;
+            } else {
+                ram_rs_mib += val;
+            }
+        }
+        for caps in re_compute.captures_iter(line) {
+            let dev = &caps[1];
+            let val = caps[2].parse::<f64>().unwrap_or(0.0);
+            if is_gpu(dev) {
+                vram_compute_mib += val;
+            } else {
+                ram_compute_mib += val;
+            }
+        }
+        if let Some(caps) = re_out_buf.captures(line) {
+            output_buffer_mib = caps[1].parse::<f64>().unwrap_or(0.0);
+        }
     }
 
-    if raw_lines.is_empty() {
-        return Err(format!(
-            "No buffer lines returned by llama-bench (arch='{}'). Raw log:\n{}",
-            arch,
-            combined.chars().take(1200).collect::<String>()
-        ));
+    if (vram_model_mib + ram_model_mib) == 0.0 && total_model_size_mib > 0.0 {
+        if ngl > 0 {
+            vram_model_mib = total_model_size_mib;
+        } else {
+            ram_model_mib = total_model_size_mib;
+        }
     }
 
-    // Step 4: If mmproj Vision Projector is provided/detected, run isolated-reserve.exe (clip_init)
+    // Step 4: Optional Vision Projector (mmproj) Isolated Reservation
     let mut has_mmproj = false;
     let mut mmproj_name = String::new();
     let mut mmproj_projector_type = String::new();
@@ -482,176 +498,98 @@ fn run_analyze_blocking(
     let mut vram_vision_compute_mib = 0.0;
     let mut ram_vision_compute_mib = 0.0;
 
-    if !mmproj_skeleton_path.is_empty() && isolated_exe.exists() {
-        let iso_dev = if device.to_lowercase().contains("metal") {
-            "metal"
-        } else if ngl == 0 {
-            "cpu"
+    if !mmproj_skeleton_path.is_empty() && Path::new(&mmproj_skeleton_path).is_file() {
+        let vision_cache = VISION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let v_key = (mmproj_skeleton_path.clone(), device.clone());
+        let cached_v = vision_cache.lock().unwrap().get(&v_key).cloned();
+
+        let v_data = if let Some(cv) = cached_v {
+            cv
         } else {
-            "cuda"
-        };
+            let mut cv = CachedVision {
+                has_mmproj: true,
+                mmproj_name: Path::new(&mmproj_skeleton_path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+                mmproj_projector_type: "clip_vision_encoder".to_string(),
+                vram_vision_model_mib: 0.0,
+                ram_vision_model_mib: 0.0,
+                vram_vision_compute_mib: 0.0,
+                ram_vision_compute_mib: 0.0,
+                extra_lines: Vec::new(),
+            };
 
-        let vcache_map = VISION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        let vcache_key = (mmproj_skeleton_path.clone(), iso_dev.to_string());
-        let cached_vis = vcache_map.lock().unwrap().get(&vcache_key).cloned();
-
-        if let Some(cv) = cached_vis {
-            has_mmproj = cv.has_mmproj;
-            mmproj_name = cv.mmproj_name;
-            mmproj_projector_type = cv.mmproj_projector_type;
-            vram_vision_model_mib = cv.vram_vision_model_mib;
-            ram_vision_model_mib = cv.ram_vision_model_mib;
-            vram_vision_compute_mib = cv.vram_vision_compute_mib;
-            ram_vision_compute_mib = cv.ram_vision_compute_mib;
-            raw_lines.extend(cv.extra_lines);
-        } else if let Ok(iso_out) = Command::new(&isolated_exe)
-            .args([
-                "-m",
-                &target_gguf,
-                "-mmproj",
-                &mmproj_skeleton_path,
-                "-ngl",
-                &ngl.to_string(),
-                "-ctx",
-                "4096",
-                "-dev",
-                iso_dev,
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            let iso_stdout = String::from_utf8_lossy(&iso_out.stdout);
-            let iso_stderr = String::from_utf8_lossy(&iso_out.stderr);
-            let iso_all = format!("{}\n{}", iso_stdout, iso_stderr);
-
-            let re_vis_compute = Regex::new(
-                r"reserve_compute_meta:\s+(\S+)\s+compute buffer size\s*=\s*([\d\.]+)\s*MiB",
-            )
-            .unwrap();
-            let re_vis_model = Regex::new(r"load_hparams:\s+model size:\s*([\d\.]+)\s*MiB").unwrap();
-
-            let mut clip_using_gpu = ngl != 0;
-            let mut log_model_mib = 0.0;
-            let mut extra_lines = Vec::new();
-
-            for line in iso_all.lines() {
-                if line.contains("CLIP using") {
-                    clip_using_gpu = line.contains("CUDA")
-                        || line.contains("Metal")
-                        || line.contains("ROCm")
-                        || line.contains("Vulkan");
-                    extra_lines.push(format!("[mmproj] {}", line.trim()));
-                }
-                if line.contains("reserve_compute_meta:") || line.contains("load_hparams: model size:") {
-                    extra_lines.push(format!("[mmproj] {}", line.trim()));
-                }
-                if line.contains("load_hparams: projector:") {
-                    if let Some(p) = line.split("projector:").nth(1) {
-                        mmproj_projector_type = p.trim().to_string();
-                    }
-                }
-                if let Some(caps) = re_vis_model.captures(line) {
-                    log_model_mib = caps[1].parse().unwrap_or(0.0);
-                }
-                if let Some(caps) = re_vis_compute.captures(line) {
-                    let dev_name = &caps[1];
-                    let val: f64 = caps[2].parse().unwrap_or(0.0);
-                    let is_gpu_dev = dev_name.starts_with("CUDA")
-                        || dev_name.starts_with("Metal")
-                        || dev_name.starts_with("ROCm")
-                        || dev_name.starts_with("Vulkan");
-                    if is_gpu_dev {
-                        vram_vision_compute_mib = val;
-                    } else {
-                        ram_vision_compute_mib = val;
-                    }
-                }
-            }
-
-            if log_model_mib > 0.0 {
-                has_mmproj = true;
-                mmproj_name = Path::new(&mmproj_skeleton_path)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "mmproj".to_string());
-                if clip_using_gpu {
-                    vram_vision_model_mib = log_model_mib;
-                } else {
-                    ram_vision_model_mib = log_model_mib;
-                }
-            }
-
-            // Also check the "vision_buffers": [...] JSON array if present
-            if let Some(vb_key_idx) = iso_stdout.find("\"vision_buffers\"") {
-                if let Some(arr_start) = iso_stdout[vb_key_idx..].find('[') {
-                    let slice_from_arr = &iso_stdout[vb_key_idx + arr_start..];
-                    if let Some(arr_end) = slice_from_arr.find(']') {
-                        let arr_json = &slice_from_arr[..=arr_end];
-                        if let Ok(vbufs) = serde_json::from_str::<Vec<IsolatedVisionBuf>>(arr_json) {
-                            has_mmproj = true;
-                            mmproj_name = Path::new(&mmproj_skeleton_path)
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "mmproj".to_string());
-                            vram_vision_model_mib = 0.0;
-                            vram_vision_compute_mib = 0.0;
-                            ram_vision_model_mib = 0.0;
-                            ram_vision_compute_mib = 0.0;
-                            for vb in vbufs {
-                                let is_gpu_dev = vb.device.starts_with("CUDA")
-                                    || vb.device.starts_with("Metal")
-                                    || vb.device.starts_with("ROCm")
-                                    || vb.device.starts_with("Vulkan");
-                                if is_gpu_dev {
-                                    vram_vision_model_mib += vb.model_mib;
-                                    vram_vision_compute_mib += vb.compute_mib;
-                                } else {
-                                    ram_vision_model_mib += vb.model_mib;
-                                    ram_vision_compute_mib += vb.compute_mib;
+            if isolated_exe.is_file() {
+                if let Ok(iso_out) = Command::new(&isolated_exe)
+                    .args(["--mmproj", &mmproj_skeleton_path, "--device", &device])
+                    .current_dir(&bin_dir)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                {
+                    let iso_stdout = String::from_utf8_lossy(&iso_out.stdout);
+                    for line in iso_stdout.lines().rev() {
+                        if let Some(json_str) = line.strip_prefix("VISION_RESERVE_JSON:") {
+                            if let Ok(bufs) = serde_json::from_str::<Vec<IsolatedVisionBuf>>(json_str) {
+                                for b in bufs {
+                                    if is_gpu(&b.device) {
+                                        cv.vram_vision_model_mib += b.model_mib;
+                                        cv.vram_vision_compute_mib += b.compute_mib;
+                                    } else {
+                                        cv.ram_vision_model_mib += b.model_mib;
+                                        cv.ram_vision_compute_mib += b.compute_mib;
+                                    }
                                 }
+                                break;
                             }
                         }
                     }
                 }
             }
 
-            raw_lines.extend(extra_lines.clone());
-            if has_mmproj {
-                vcache_map.lock().unwrap().insert(
-                    vcache_key,
-                    CachedVision {
-                        has_mmproj,
-                        mmproj_name: mmproj_name.clone(),
-                        mmproj_projector_type: mmproj_projector_type.clone(),
-                        vram_vision_model_mib,
-                        ram_vision_model_mib,
-                        vram_vision_compute_mib,
-                        ram_vision_compute_mib,
-                        extra_lines,
-                    },
-                );
+            // Fallback estimation from file size if isolated tool is unavailable
+            if cv.vram_vision_model_mib == 0.0 && cv.ram_vision_model_mib == 0.0 {
+                let sz = std::fs::metadata(&mmproj_skeleton_path).map(|m| m.len()).unwrap_or(0);
+                let mm_mib = ((sz as f64 / (1024.0 * 1024.0)) * 10.0).round() / 10.0;
+                if ngl > 0 {
+                    cv.vram_vision_model_mib = mm_mib;
+                    cv.vram_vision_compute_mib = 128.0;
+                } else {
+                    cv.ram_vision_model_mib = mm_mib;
+                    cv.ram_vision_compute_mib = 128.0;
+                }
             }
-        }
+
+            vision_cache.lock().unwrap().insert(v_key, cv.clone());
+            cv
+        };
+
+        has_mmproj = v_data.has_mmproj;
+        mmproj_name = v_data.mmproj_name;
+        mmproj_projector_type = v_data.mmproj_projector_type;
+        vram_vision_model_mib = v_data.vram_vision_model_mib;
+        ram_vision_model_mib = v_data.ram_vision_model_mib;
+        vram_vision_compute_mib = v_data.vram_vision_compute_mib;
+        ram_vision_compute_mib = v_data.ram_vision_compute_mib;
     }
 
     let total_vram_mib = vram_model_mib
         + vram_kv_mib
         + vram_rs_mib
         + vram_compute_mib
+        + output_buffer_mib
         + vram_vision_model_mib
         + vram_vision_compute_mib;
-    let total_ram_mib = ram_model_mib
-        + ram_kv_mib
-        + ram_rs_mib
-        + ram_compute_mib
-        + output_buffer_mib
-        + ram_vision_model_mib
-        + ram_vision_compute_mib;
 
-    let model_name = Path::new(&target_gguf)
-        .file_stem()
+    let total_ram_mib =
+        ram_model_mib + ram_kv_mib + ram_rs_mib + ram_compute_mib + ram_vision_model_mib + ram_vision_compute_mib;
+
+    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+    let model_name = Path::new(&resolved_url)
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Model".to_string());
+        .unwrap_or_else(|| resolved_url.clone());
 
     Ok(BenchResult {
         model_name,
@@ -686,43 +624,97 @@ fn run_analyze_blocking(
         output_buffer_mib,
         total_vram_mib,
         total_ram_mib,
-        elapsed_ms: start_time.elapsed().as_millis() as u64,
+        elapsed_ms,
         prep_time_ms,
-        bench_time_ms: bench_start.elapsed().as_millis() as f64,
+        bench_time_ms,
         is_local_model,
         raw_lines,
         hardware,
     })
 }
 
-fn run_detect_hardware_blocking() -> Result<HardwareInfo, String> {
-    if let Some(mut cached_hw) = HW_CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap().clone() {
-        refresh_live_ram_ffi(&mut cached_hw);
-        return Ok(cached_hw);
-    }
+#[derive(Serialize)]
+struct ModelReport {
+    target: String,
+    tiers: Vec<BenchResult>,
+}
 
-    let bin_dir = get_bin_dir();
-    let helper_py = bin_dir.join("desktop_helper.py");
-    let helper_out = Command::new("py")
-        .args(["-3.11", helper_py.to_str().unwrap(), "--detect-hw"])
-        .current_dir(&bin_dir)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to invoke hardware detector: {}", e))?;
+#[tauri::command]
+async fn analyze_model(
+    target: String,
+    mmproj: Option<String>,
+    device: Option<String>,
+    ngl: Option<i32>,
+    ncmoe: Option<u32>,
+    custom_context: Option<u32>,
+) -> Result<ModelReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dev = device.unwrap_or_else(|| "CUDA".to_string());
+        let ngl_val = ngl.unwrap_or(999);
 
-    let helper_stdout = String::from_utf8_lossy(&helper_out.stdout);
-    for line in helper_stdout.lines().rev() {
-        if let Some(json_str) = line.strip_prefix("JSON_RESULT:") {
-            if let Ok(resp) = serde_json::from_str::<HelperResponse>(json_str) {
-                if let Some(mut hw) = resp.hardware {
-                    refresh_live_ram_ffi(&mut hw);
-                    *HW_CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hw.clone());
-                    return Ok(hw);
-                }
+        // First run at 8192 context to fetch hyperparameters and skeleton
+        let r_8k = run_analyze_blocking(
+            target.clone(),
+            mmproj.clone(),
+            8192,
+            ngl_val,
+            ncmoe,
+            dev.clone(),
+        )?;
+
+        let native_ctx = r_8k.native_context_length;
+        let true_max_ctx = if let Some(cust) = custom_context {
+            cust.max(8192)
+        } else {
+            native_ctx.max(8192)
+        };
+
+        let mut tiers = Vec::new();
+        tiers.push(r_8k);
+
+        // Tier 2: 64K Context (or native_ctx if between 8K and 64K)
+        if true_max_ctx > 8192 {
+            let ctx_tier2 = if true_max_ctx < 65536 { true_max_ctx } else { 65536 };
+            if ctx_tier2 > 8192 {
+                let r_mid = run_analyze_blocking(
+                    target.clone(),
+                    mmproj.clone(),
+                    ctx_tier2,
+                    ngl_val,
+                    ncmoe,
+                    dev.clone(),
+                )?;
+                tiers.push(r_mid);
             }
         }
+
+        // Tier 3: True Max Context (e.g. 131K, 262K, or 1M)
+        if true_max_ctx > 65536 {
+            let r_max = run_analyze_blocking(
+                target.clone(),
+                mmproj.clone(),
+                true_max_ctx,
+                ngl_val,
+                ncmoe,
+                dev.clone(),
+            )?;
+            tiers.push(r_max);
+        }
+
+        Ok(ModelReport { target, tiers })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+fn run_detect_hardware_blocking() -> Result<HardwareInfo, String> {
+    if let Some(mut cached_hw) = HW_CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap().clone() {
+        hw::refresh_live_ram_ffi(&mut cached_hw);
+        return Ok(cached_hw);
     }
-    Err("Failed to parse hardware info".to_string())
+    let hw = hw::detect_system_hardware();
+    *HW_CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hw.clone());
+    Ok(hw)
 }
 
 #[tauri::command]
@@ -733,27 +725,7 @@ async fn detect_hardware() -> Result<HardwareInfo, String> {
 }
 
 fn run_scan_local_blocking(extra_dir: Option<String>) -> Result<Vec<LocalModelEntry>, String> {
-    let bin_dir = get_bin_dir();
-    let helper_py = bin_dir.join("desktop_helper.py");
-    let extra_arg = extra_dir.unwrap_or_default().trim().to_string();
-    let helper_out = Command::new("py")
-        .args(["-3.11", helper_py.to_str().unwrap(), "--scan-local", &extra_arg])
-        .current_dir(&bin_dir)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to invoke local model scanner: {}", e))?;
-
-    let helper_stdout = String::from_utf8_lossy(&helper_out.stdout);
-    for line in helper_stdout.lines().rev() {
-        if let Some(json_str) = line.strip_prefix("JSON_RESULT:") {
-            if let Ok(resp) = serde_json::from_str::<HelperResponse>(json_str) {
-                if let Some(models) = resp.local_models {
-                    return Ok(models);
-                }
-            }
-        }
-    }
-    Err("Failed to parse local models scan output".to_string())
+    Ok(scanner::scan_local_models(extra_dir))
 }
 
 #[tauri::command]
@@ -863,131 +835,67 @@ async fn start_model_download(url_or_repo: String) -> Result<String, String> {
         return Err("Please enter a Hugging Face repo or GGUF URL to download.".to_string());
     }
 
-    let child_slot = DOWNLOAD_CHILD.get_or_init(|| Mutex::new(None));
-    {
-        let mut guard = child_slot.lock().unwrap();
-        if let Some(mut existing) = guard.take() {
-            let _ = existing.kill();
-            let _ = existing.wait();
-        }
-    }
+    let cancel_flag = DOWNLOAD_CANCEL.get_or_init(|| Arc::new(AtomicBool::new(false)));
+    cancel_flag.store(false, Ordering::Relaxed);
+    let cancel_clone = cancel_flag.clone();
 
-    let bin_dir = get_bin_dir();
-    let helper_py = bin_dir.join("desktop_helper.py");
     let status_path = get_app_data_dir().join("download_status.json");
 
-    let init_status = DownloadStatus {
-        active: true,
-        status: "resolving".to_string(),
-        filename: target.clone(),
-        url: target.clone(),
-        downloaded_mib: 0.0,
-        total_mib: 0.0,
-        percent: 0.0,
-        speed_mbs: 0.0,
-        output_path: String::new(),
-        error: None,
-    };
-    if let Ok(js) = serde_json::to_string(&init_status) {
-        let _ = std::fs::write(&status_path, js);
-    }
+    downloader::write_download_status(
+        &status_path,
+        &DownloadStatus {
+            active: true,
+            status: "resolving".to_string(),
+            filename: target.clone(),
+            url: target.clone(),
+            downloaded_mib: 0.0,
+            total_mib: 0.0,
+            percent: 0.0,
+            speed_mbs: 0.0,
+            output_path: String::new(),
+            error: None,
+        },
+    );
 
-    let child = Command::new("py")
-        .args([
-            "-3.11",
-            helper_py.to_str().unwrap(),
-            "--download-full",
-            &target,
-            status_path.to_str().unwrap(),
-        ])
-        .current_dir(&bin_dir)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("Failed to start downloader process: {}", e))?;
+    std::thread::spawn(move || {
+        let _ = downloader::download_full_gguf_sync(&target, &status_path, cancel_clone);
+    });
 
-    *child_slot.lock().unwrap() = Some(child);
     Ok("Download started".to_string())
 }
 
 #[tauri::command]
 async fn get_download_status() -> Result<DownloadStatus, String> {
     let status_path = get_app_data_dir().join("download_status.json");
-    let mut status: DownloadStatus = if status_path.is_file() {
-        std::fs::read_to_string(&status_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    } else {
-        DownloadStatus::default()
-    };
-
-    if let Some(child_slot) = DOWNLOAD_CHILD.get() {
-        let mut guard = child_slot.lock().unwrap();
-        if let Some(child) = guard.as_mut() {
-            if let Ok(Some(_exit)) = child.try_wait() {
-                *guard = None;
-                // Re-read status after process exit
-                if status_path.is_file() {
-                    if let Some(updated) = std::fs::read_to_string(&status_path)
-                        .ok()
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                    {
-                        status = updated;
-                    }
-                }
-                if status.active {
-                    status.active = false;
-                    if status.status == "downloading" || status.status == "resolving" {
-                        status.status = "stopped".to_string();
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(status)
-}
-
-#[tauri::command]
-async fn cancel_model_download() -> Result<(), String> {
-    if let Some(child_slot) = DOWNLOAD_CHILD.get() {
-        let mut guard = child_slot.lock().unwrap();
-        if let Some(mut child) = guard.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    let status_path = get_app_data_dir().join("download_status.json");
     if status_path.is_file() {
-        if let Some(mut st) = std::fs::read_to_string(&status_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<DownloadStatus>(&s).ok())
-        {
-            st.active = false;
-            st.status = "cancelled".to_string();
-            if let Ok(js) = serde_json::to_string(&st) {
-                let _ = std::fs::write(&status_path, js);
+        if let Ok(content) = std::fs::read_to_string(&status_path) {
+            if let Ok(status) = serde_json::from_str::<DownloadStatus>(&content) {
+                return Ok(status);
             }
         }
     }
-    Ok(())
+    Ok(DownloadStatus::default())
 }
 
 #[tauri::command]
-async fn analyze_model(
-    url_or_path: String,
-    mmproj_url_or_path: Option<String>,
-    context_size: u32,
-    ngl: i32,
-    ncmoe: Option<u32>,
-    device: String,
-) -> Result<BenchResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        run_analyze_blocking(url_or_path, mmproj_url_or_path, context_size, ngl, ncmoe, device)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+async fn cancel_model_download() -> Result<String, String> {
+    if let Some(flag) = DOWNLOAD_CANCEL.get() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    let status_path = get_app_data_dir().join("download_status.json");
+    let mut current = DownloadStatus::default();
+    if status_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&status_path) {
+            if let Ok(s) = serde_json::from_str::<DownloadStatus>(&content) {
+                current = s;
+            }
+        }
+    }
+    current.active = false;
+    current.status = "cancelled".to_string();
+    current.error = Some("Download cancelled by user".to_string());
+    downloader::write_download_status(&status_path, &current);
+    Ok("Download cancelled".to_string())
 }
 
 fn clean_session_skeletons() {
@@ -1020,4 +928,65 @@ fn main() {
                 clean_session_skeletons();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hardware_detection_native() {
+        let hw = hw::detect_system_hardware();
+        assert!(!hw.cpu_name.is_empty(), "CPU name should not be empty");
+        assert!(hw.ram_total_mib > 0.0, "Total RAM should be greater than 0");
+        assert!(hw.ram_channels >= 1, "RAM channels should be at least 1");
+        assert!(hw.measured_ram_gbs > 0.0, "Measured RAM bandwidth should be > 0");
+        println!(
+            "Detected CPU: {} ({} threads, {} MHz)",
+            hw.cpu_name, hw.cpu_threads, hw.cpu_mhz
+        );
+        println!(
+            "RAM: {:.1} MiB total, {:.1} MiB free, {} channels @ {} MT/s ({:.1} GB/s measured)",
+            hw.ram_total_mib, hw.ram_free_mib, hw.ram_channels, hw.ram_speed_mts, hw.measured_ram_gbs
+        );
+        println!(
+            "GPU: {} (discrete: {}, {:.1} MiB VRAM)",
+            hw.gpu_name, hw.gpu_is_discrete, hw.gpu_vram_total_mib
+        );
+    }
+
+    #[test]
+    fn test_hf_repo_parser() {
+        assert_eq!(
+            hf::parse_repo_id("unsloth/DeepSeek-R1-GGUF"),
+            Some("unsloth/DeepSeek-R1-GGUF".to_string())
+        );
+        assert_eq!(
+            hf::parse_repo_id("https://huggingface.co/unsloth/DeepSeek-R1-GGUF"),
+            Some("unsloth/DeepSeek-R1-GGUF".to_string())
+        );
+        assert_eq!(
+            hf::parse_repo_id("https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/tree/main"),
+            Some("Qwen/Qwen2.5-7B-Instruct-GGUF".to_string())
+        );
+    }
+
+    #[test]
+    fn test_llama_cpp_arch_support() {
+        let archs = get_llama_cpp_supported_archs();
+        assert!(archs.contains("llama"));
+        assert!(archs.contains("qwen2"));
+        assert!(archs.contains("deepseek2"));
+        assert!(archs.contains("gemma2"));
+        assert!(archs.len() >= 40);
+    }
+
+    #[test]
+    fn test_local_model_scanner() {
+        let models = scanner::scan_local_models(None);
+        println!("Scanned local models count: {}", models.len());
+        for m in models.iter().take(3) {
+            println!("- [{}] {} (arch: {}, size: {:.1} MiB)", m.source, m.name, m.arch, m.model_logical_mib);
+        }
+    }
 }

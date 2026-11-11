@@ -14,4 +14,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 dirs = "5"
+ureq = { version = "2", features = ["json"] }
+winreg = "0.52"
 
+# The bandwidth benchmark and GGUF parsing are CPU-bound loops; keep dev builds fast enough to be representative.
+[profile.dev]
+opt-level = 2
