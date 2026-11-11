@@ -387,6 +387,14 @@ fn run_analyze_blocking(
         "-v".to_string(),
     ];
 
+    let target_dev = if device.trim().is_empty() {
+        "CUDA0".to_string()
+    } else {
+        device.clone()
+    };
+    bench_args.push("-dev".to_string());
+    bench_args.push(target_dev);
+
     if device.to_uppercase() == "CPU" {
         bench_args.push("-ngl".to_string());
         bench_args.push("0".to_string());
