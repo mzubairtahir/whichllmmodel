@@ -633,75 +633,17 @@ fn run_analyze_blocking(
     })
 }
 
-#[derive(Serialize)]
-struct ModelReport {
-    target: String,
-    tiers: Vec<BenchResult>,
-}
-
 #[tauri::command]
 async fn analyze_model(
-    target: String,
-    mmproj: Option<String>,
-    device: Option<String>,
-    ngl: Option<i32>,
+    url_or_path: String,
+    mmproj_url_or_path: Option<String>,
+    context_size: u32,
+    ngl: i32,
     ncmoe: Option<u32>,
-    custom_context: Option<u32>,
-) -> Result<ModelReport, String> {
+    device: String,
+) -> Result<BenchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dev = device.unwrap_or_else(|| "CUDA".to_string());
-        let ngl_val = ngl.unwrap_or(999);
-
-        // First run at 8192 context to fetch hyperparameters and skeleton
-        let r_8k = run_analyze_blocking(
-            target.clone(),
-            mmproj.clone(),
-            8192,
-            ngl_val,
-            ncmoe,
-            dev.clone(),
-        )?;
-
-        let native_ctx = r_8k.native_context_length;
-        let true_max_ctx = if let Some(cust) = custom_context {
-            cust.max(8192)
-        } else {
-            native_ctx.max(8192)
-        };
-
-        let mut tiers = Vec::new();
-        tiers.push(r_8k);
-
-        // Tier 2: 64K Context (or native_ctx if between 8K and 64K)
-        if true_max_ctx > 8192 {
-            let ctx_tier2 = if true_max_ctx < 65536 { true_max_ctx } else { 65536 };
-            if ctx_tier2 > 8192 {
-                let r_mid = run_analyze_blocking(
-                    target.clone(),
-                    mmproj.clone(),
-                    ctx_tier2,
-                    ngl_val,
-                    ncmoe,
-                    dev.clone(),
-                )?;
-                tiers.push(r_mid);
-            }
-        }
-
-        // Tier 3: True Max Context (e.g. 131K, 262K, or 1M)
-        if true_max_ctx > 65536 {
-            let r_max = run_analyze_blocking(
-                target.clone(),
-                mmproj.clone(),
-                true_max_ctx,
-                ngl_val,
-                ncmoe,
-                dev.clone(),
-            )?;
-            tiers.push(r_max);
-        }
-
-        Ok(ModelReport { target, tiers })
+        run_analyze_blocking(url_or_path, mmproj_url_or_path, context_size, ngl, ncmoe, device)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
