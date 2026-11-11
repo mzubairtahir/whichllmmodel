@@ -372,22 +372,36 @@ fn run_analyze_blocking(
     }
 
     // Step 2: Execute llama-bench.exe with -r 0 (Zero-Weight Null-Backend reservation)
+    // Note: llama-bench uses -p <prompt_tokens> to test context size (it does NOT accept -c)
     let bench_start = Instant::now();
+    let mut bench_args = vec![
+        "-m".to_string(),
+        target_gguf.clone(),
+        "-r".to_string(),
+        "0".to_string(),
+        "-p".to_string(),
+        context_size.to_string(),
+        "-n".to_string(),
+        "0".to_string(),
+        "--no-warmup".to_string(),
+        "-v".to_string(),
+    ];
+
+    if device.to_uppercase() == "CPU" {
+        bench_args.push("-ngl".to_string());
+        bench_args.push("0".to_string());
+    } else {
+        bench_args.push("-ngl".to_string());
+        bench_args.push(ngl.to_string());
+    }
+
+    if ncmoe_val > 0 {
+        bench_args.push("-ncmoe".to_string());
+        bench_args.push(ncmoe_val.to_string());
+    }
+
     let output = Command::new(&bench_exe)
-        .args([
-            "-m",
-            &target_gguf,
-            "-n",
-            "0",
-            "-r",
-            "0",
-            "-p",
-            "0",
-            "-c",
-            &context_size.to_string(),
-            "-ngl",
-            &ngl.to_string(),
-        ])
+        .args(&bench_args)
         .current_dir(&bin_dir)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
