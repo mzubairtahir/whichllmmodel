@@ -116,6 +116,8 @@ interface BenchResult {
   is_local_model: boolean;
   raw_lines: string[];
   hardware?: HardwareInfo;
+  kv_quant?: string;
+  no_kv_offload?: boolean;
 }
 
 const SPEED_UNCERTAINTY = 0.15;
@@ -155,6 +157,8 @@ export default function App() {
   const [ngl, setNgl] = useState(99);
   const [ncmoe, setNcmoe] = useState(0);
   const [device, setDevice] = useState("CUDA0");
+  const [kvQuant, setKvQuant] = useState<string>("q8_0");
+  const [noKvOffload, setNoKvOffload] = useState<boolean>(false);
   const [vramBudgetGb, setVramBudgetGb] = useState(16);
   const [vramBwGbs, setVramBwGbs] = useState(26.2);
   const [ramBwGbs, setRamBwGbs] = useState(26.2);
@@ -163,6 +167,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BenchResult | null>(null);
   const [copied, setCopied] = useState(false);
+  const [cmdMode, setCmdMode] = useState<"cli" | "server">("cli");
 
   // System
   const [hwInfo, setHwInfo] = useState<HardwareInfo | null>(null);
@@ -324,7 +329,9 @@ export default function App() {
     ctx = contextSize,
     layers = ngl,
     moe = ncmoe,
-    dev = device
+    dev = device,
+    quant = kvQuant,
+    noOffload = noKvOffload
   ) => {
     if (!target.trim()) return;
     setLoading(true);
@@ -337,6 +344,8 @@ export default function App() {
         ngl: layers,
         ncmoe: moe,
         device: dev,
+        kvQuant: quant,
+        noKvOffload: noOffload,
       });
       setResult(res);
       if (res.hardware) {
@@ -347,7 +356,7 @@ export default function App() {
       if (nativeCtx > 0 && ctx > nativeCtx) {
         // Requested context exceeds what this model supports: re-check at the model's real maximum.
         setContextSize(nativeCtx);
-        await runCheck(target, mmproj, nativeCtx, layers, moe, dev);
+        await runCheck(target, mmproj, nativeCtx, layers, moe, dev, quant, noOffload);
         return;
       }
       setContextSize(ctx);
@@ -367,7 +376,7 @@ export default function App() {
     const layers = discrete ? 99 : 0;
     setVramBudgetGb(Math.max(1, Math.round((hwInfo.gpu_vram_total_mib || 1024) / 1024)));
     setNgl(layers);
-    runCheck(urlOrPath, mmprojUrlOrPath, contextSize, layers, ncmoe, device);
+    runCheck(urlOrPath, mmprojUrlOrPath, contextSize, layers, ncmoe, device, kvQuant, noKvOffload);
   };
 
   const openInCheck = (m: LocalModelEntry) => {
@@ -375,7 +384,7 @@ export default function App() {
     setMmprojUrlOrPath(m.mmproj_path || "");
     setShowVision(Boolean(m.mmproj_path));
     setPage("check");
-    runCheck(m.model_path, m.mmproj_path || "");
+    runCheck(m.model_path, m.mmproj_path || "", contextSize, ngl, ncmoe, device, kvQuant, noKvOffload);
   };
 
   useEffect(() => {
@@ -430,14 +439,43 @@ export default function App() {
   const isRemote =
     urlOrPath.trim().startsWith("http") || (urlOrPath.includes("/") && !urlOrPath.includes("\\") && !urlOrPath.includes(":"));
 
-  const cliCommand = result
-    ? `llama-cli -m "${result.model_name}.gguf"${result.has_mmproj ? ` --mmproj "${result.mmproj_name}.gguf"` : ""} -ngl ${result.ngl}${
-        ncmoe > 0 ? ` -ncmoe ${ncmoe}` : ""
-      } -c ${result.context_size} -ub 512 -b 512 -fa on`
+  const activeKvQuant = result?.kv_quant || kvQuant;
+  const activeNoKvOffload = result?.no_kv_offload ?? noKvOffload;
+  const modelFile = result
+    ? result.model_name.toLowerCase().endsWith(".gguf")
+      ? result.model_name
+      : `${result.model_name}.gguf`
+    : "";
+  const mmprojFile = result?.has_mmproj
+    ? result.mmproj_name.toLowerCase().endsWith(".gguf")
+      ? result.mmproj_name
+      : `${result.mmproj_name}.gguf`
     : "";
 
+  const activeNgl = result?.ngl ?? ngl;
+  const activeNcmoe = result?.ncmoe ?? ncmoe;
+  const activeCtx = result?.context_size ?? contextSize;
+
+  const cliCommand = result
+    ? `llama-cli -m "${modelFile}"${mmprojFile ? ` --mmproj "${mmprojFile}"` : ""} -ngl ${activeNgl}${
+        activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
+      } -c ${activeCtx} -ub 512 -b 512 -fa on${
+        activeKvQuant && activeKvQuant !== "f16" ? ` -ctk ${activeKvQuant} -ctv ${activeKvQuant}` : ""
+      }${activeNoKvOffload ? " -nkvo 1" : ""}`
+    : "";
+
+  const serverCommand = result
+    ? `llama-server -m "${modelFile}"${mmprojFile ? ` --mmproj "${mmprojFile}"` : ""} -ngl ${activeNgl}${
+        activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
+      } -c ${activeCtx} -ub 512 -b 512 -fa on${
+        activeKvQuant && activeKvQuant !== "f16" ? ` -ctk ${activeKvQuant} -ctv ${activeKvQuant}` : ""
+      }${activeNoKvOffload ? " -nkvo 1" : ""} --port 8080`
+    : "";
+
+  const displayedCommand = cmdMode === "server" ? serverCommand : cliCommand;
+
   const copyCli = () => {
-    navigator.clipboard.writeText(cliCommand);
+    navigator.clipboard.writeText(displayedCommand);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -676,7 +714,7 @@ export default function App() {
                       }))}
                       onChange={(v) => {
                         setContextSize(v);
-                        runCheck(urlOrPath, mmprojUrlOrPath, v);
+                        runCheck(urlOrPath, mmprojUrlOrPath, v, ngl, ncmoe, device, kvQuant, noKvOffload);
                       }}
                     />
                   </div>
@@ -692,7 +730,25 @@ export default function App() {
                       ]}
                       onChange={(v) => {
                         setNgl(v);
-                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, v);
+                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, v, ncmoe, device, kvQuant, noKvOffload);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="label">
+                      Context compression
+                      <span className="font-normal text-muted"> · KV cache</span>
+                    </div>
+                    <Seg
+                      value={kvQuant}
+                      options={[
+                        { v: "q8_0", label: "Balanced (8-bit) · Rec" },
+                        { v: "q4_0", label: "Max Context (4-bit)" },
+                        { v: "f16", label: "Uncompressed (16-bit)" },
+                      ]}
+                      onChange={(v) => {
+                        setKvQuant(v);
+                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, v, noKvOffload);
                       }}
                     />
                   </div>
@@ -710,7 +766,7 @@ export default function App() {
                         ]}
                         onChange={(v) => {
                           setNcmoe(v);
-                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, v);
+                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, v, device, kvQuant, noKvOffload);
                         }}
                       />
                     </div>
@@ -723,7 +779,7 @@ export default function App() {
                         value={device}
                         onChange={(e) => {
                           setDevice(e.target.value);
-                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, e.target.value);
+                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, e.target.value, kvQuant, noKvOffload);
                         }}
                       >
                         <option value="CUDA0">NVIDIA CUDA</option>
@@ -757,6 +813,22 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                  </div>
+                  <div className="space-y-1.5 md:col-span-2 pt-2 border-t border-line/50">
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none text-xs text-fg">
+                      <input
+                        type="checkbox"
+                        checked={noKvOffload}
+                        onChange={(e) => {
+                          const val = e.target.checked;
+                          setNoKvOffload(val);
+                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, kvQuant, val);
+                        }}
+                        className="rounded border-line text-accent focus:ring-0 cursor-pointer h-4 w-4"
+                      />
+                      <span className="font-medium">Store context in System RAM instead of GPU VRAM</span>
+                      <span className="text-muted">(frees GPU graphics memory so you can fit larger models or more layers)</span>
+                    </label>
                   </div>
                 </div>
               </section>
@@ -871,7 +943,7 @@ export default function App() {
                       </div>
                       {[
                         ["Model weights", result.vram_model_mib, result.ram_model_mib],
-                        [`KV cache (${Math.round(result.context_size / 1024)}K context)`, result.vram_kv_mib, result.ram_kv_mib],
+                        [`KV cache (${Math.round(result.context_size / 1024)}K context${result.kv_quant && result.kv_quant !== "f16" ? ` · ${result.kv_quant.toUpperCase()}` : ""}${result.no_kv_offload ? " · in RAM" : ""})`, result.vram_kv_mib, result.ram_kv_mib],
                         ["Recurrent state", result.vram_rs_mib, result.ram_rs_mib],
                         ["Compute buffer", result.vram_compute_mib, result.ram_compute_mib],
                         ["Output buffer", 0, result.output_buffer_mib],
@@ -923,10 +995,30 @@ export default function App() {
                           Total: <strong className="text-fg">{result.elapsed_ms} ms</strong>
                         </span>
                       </div>
-                      <div className="flex gap-2 shrink-0">
+                      <div className="flex gap-2 shrink-0 items-center">
+                        <div className="inline-flex rounded-md border border-line bg-bg p-0.5 text-xs">
+                          <button
+                            type="button"
+                            className={`px-2 py-0.5 rounded font-mono text-[11px] transition-colors ${
+                              cmdMode === "cli" ? "bg-surface text-fg font-medium shadow-sm" : "text-muted hover:text-fg"
+                            }`}
+                            onClick={() => setCmdMode("cli")}
+                          >
+                            CLI Chat
+                          </button>
+                          <button
+                            type="button"
+                            className={`px-2 py-0.5 rounded font-mono text-[11px] transition-colors ${
+                              cmdMode === "server" ? "bg-surface text-fg font-medium shadow-sm" : "text-muted hover:text-fg"
+                            }`}
+                            onClick={() => setCmdMode("server")}
+                          >
+                            Server (API)
+                          </button>
+                        </div>
                         <button className="btn !py-1" onClick={copyCli}>
                           {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                          {copied ? "Copied" : "Copy command"}
+                          {copied ? "Copied" : `Copy ${cmdMode === "server" ? "server" : "cli"}`}
                         </button>
                         <button className="btn !py-1" onClick={() => setShowLogs(!showLogs)}>
                           Details
@@ -934,8 +1026,8 @@ export default function App() {
                         </button>
                       </div>
                     </div>
-                    <div className="text-xs font-mono text-muted truncate border-t border-line/60 pt-2">
-                      {cliCommand}
+                    <div className="text-xs font-mono text-muted truncate border-t border-line/60 pt-2 select-all">
+                      {displayedCommand}
                     </div>
                     {showLogs && (
                       <pre className="rounded-md bg-bg border border-line p-3 text-[11px] font-mono text-muted max-h-48 overflow-auto">
