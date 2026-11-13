@@ -230,6 +230,22 @@ fn prepare_model_native(url_or_path: &str, mmproj_arg: &str) -> Result<HelperRes
                 mmproj_skeleton_path = skel.to_string_lossy().to_string();
             }
         }
+    } else if is_already_local {
+        // Auto-detect if there's a paired mmproj in the same directory
+        if let Some(parent) = Path::new(url_or_path).parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let fname = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                        if fname.contains("mmproj") && fname.ends_with(".gguf") {
+                            mmproj_skeleton_path = path.to_string_lossy().to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let prep_time_ms = ((t0.elapsed().as_secs_f64() * 1000.0) * 10.0).round() / 10.0;
@@ -289,6 +305,9 @@ struct BenchResult {
     is_moe: bool,
     expert_count: u32,
     expert_used_count: u32,
+    detected_mmproj: bool,
+    detected_mmproj_name: String,
+    include_vision: bool,
     has_mmproj: bool,
     mmproj_name: String,
     mmproj_projector_type: String,
@@ -330,12 +349,14 @@ fn run_analyze_blocking(
     device: String,
     kv_quant: Option<String>,
     no_kv_offload: Option<bool>,
+    include_vision: Option<bool>,
 ) -> Result<BenchResult, String> {
     let start_time = Instant::now();
     let ncmoe_val = ncmoe.unwrap_or(0);
     let mmproj_arg = mmproj_url_or_path.unwrap_or_default().trim().to_string();
     let kv_quant_val = kv_quant.unwrap_or_else(|| "f16".to_string());
     let no_kv_offload_val = no_kv_offload.unwrap_or(false);
+    let include_vision_val = include_vision.unwrap_or(true);
 
     let bin_dir = get_bin_dir();
     let isolated_exe = bin_dir.join("isolated-reserve.exe");
@@ -400,8 +421,13 @@ fn run_analyze_blocking(
     };
 
     let is_gpu = |dev: &str| {
+        if target_dev.to_uppercase() == "CPU" {
+            return false;
+        }
         let d = dev.to_lowercase();
-        d.contains("cuda") || d.contains("metal") || d.contains("vulkan") || d.contains("kompute") || d.contains("sycl")
+        (d.contains("cuda") || d.contains("metal") || d.contains("vulkan") || d.contains("kompute") || d.contains("sycl"))
+            && !d.contains("cpu")
+            && !d.contains("host")
     };
 
     let mut vram_model_mib = 0.0;
@@ -424,6 +450,22 @@ fn run_analyze_blocking(
     let mut ram_vision_model_mib = 0.0;
     let mut vram_vision_compute_mib = 0.0;
     let mut ram_vision_compute_mib = 0.0;
+
+    let detected_mmproj = !mmproj_skeleton_path.is_empty();
+    let detected_mmproj_name = if detected_mmproj {
+        Path::new(&mmproj_skeleton_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        String::new()
+    };
+    let active_mmproj_skeleton = if include_vision_val {
+        mmproj_skeleton_path.clone()
+    } else {
+        String::new()
+    };
 
     // Step 2: Primary execution via isolated-reserve.exe (Zero physical allocation, ~50ms speed)
     if isolated_exe.is_file() {
@@ -456,9 +498,9 @@ fn run_analyze_blocking(
             iso_args.push("1".to_string());
         }
 
-        if !mmproj_skeleton_path.is_empty() {
+        if !active_mmproj_skeleton.is_empty() {
             iso_args.push("-mmproj".to_string());
-            iso_args.push(mmproj_skeleton_path.clone());
+            iso_args.push(active_mmproj_skeleton.clone());
         }
 
         if let Ok(output) = Command::new(&isolated_exe)
@@ -485,35 +527,50 @@ fn run_analyze_blocking(
                 .collect();
 
             if let Some(pos) = stdout.find("\"metadata\":") {
-                if let Some(brace_idx) = stdout[..pos].rfind('{') {
-                    let json_str = &stdout[brace_idx..];
-                    if let Ok(iso) = serde_json::from_str::<IsolatedReserveJson>(json_str) {
-                        for b in iso.buffers {
-                            let on_gpu = !b.is_host && is_gpu(&b.buffer_type);
-                            if on_gpu {
-                                vram_model_mib += b.model_mib;
-                                vram_kv_mib += b.context_mib;
-                                vram_compute_mib += b.compute_mib;
-                            } else {
-                                ram_model_mib += b.model_mib;
-                                ram_kv_mib += b.context_mib;
-                                ram_compute_mib += b.compute_mib;
-                            }
-                        }
+                if let Some(start_brace) = stdout[..pos].rfind('{') {
+                    if let Some(end_brace) = stdout.rfind('}') {
+                        let json_str = &stdout[start_brace..=end_brace];
+                        let clean_json = json_str.replace('\\', "/");
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&clean_json) {
+                            if let Some(bufs) = v.get("buffers").and_then(|b| b.as_array()) {
+                                for b in bufs {
+                                    let buft = b.get("buffer_type").and_then(|s| s.as_str()).unwrap_or("");
+                                    let is_host = b.get("is_host").and_then(|s| s.as_bool()).unwrap_or(false);
+                                    let m_mib = b.get("model_mib").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                                    let c_mib = b.get("context_mib").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                                    let cmp_mib = b.get("compute_mib").and_then(|n| n.as_f64()).unwrap_or(0.0);
 
-                        for v in iso.vision_buffers {
-                            has_mmproj = true;
-                            let on_gpu = is_gpu(&v.device);
-                            if on_gpu {
-                                vram_vision_model_mib += v.model_mib;
-                                vram_vision_compute_mib += v.compute_mib;
-                            } else {
-                                ram_vision_model_mib += v.model_mib;
-                                ram_vision_compute_mib += v.compute_mib;
+                                    let on_gpu = !is_host && is_gpu(buft);
+                                    if on_gpu {
+                                        vram_model_mib += m_mib;
+                                        vram_kv_mib += c_mib;
+                                        vram_compute_mib += cmp_mib;
+                                    } else {
+                                        ram_model_mib += m_mib;
+                                        ram_kv_mib += c_mib;
+                                        ram_compute_mib += cmp_mib;
+                                    }
+                                }
                             }
-                        }
+                            if let Some(vis) = v.get("vision_buffers").and_then(|b| b.as_array()) {
+                                for vb in vis {
+                                    has_mmproj = true;
+                                    let dev = vb.get("device").and_then(|s| s.as_str()).unwrap_or("");
+                                    let m_mib = vb.get("model_mib").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                                    let cmp_mib = vb.get("compute_mib").and_then(|n| n.as_f64()).unwrap_or(0.0);
 
-                        simulated_ok = (vram_model_mib + ram_model_mib + vram_kv_mib + ram_kv_mib) > 0.0;
+                                    let on_gpu = is_gpu(dev);
+                                    if on_gpu {
+                                        vram_vision_model_mib += m_mib;
+                                        vram_vision_compute_mib += cmp_mib;
+                                    } else {
+                                        ram_vision_model_mib += m_mib;
+                                        ram_vision_compute_mib += cmp_mib;
+                                    }
+                                }
+                            }
+                            simulated_ok = (vram_model_mib + ram_model_mib + vram_kv_mib + ram_kv_mib) > 0.0;
+                        }
                     }
                 }
             }
@@ -654,9 +711,9 @@ fn run_analyze_blocking(
     }
 
     // Step 4: Optional Vision Projector (mmproj) Isolated Reservation
-    if !mmproj_skeleton_path.is_empty() && Path::new(&mmproj_skeleton_path).is_file() {
+    if !active_mmproj_skeleton.is_empty() && Path::new(&active_mmproj_skeleton).is_file() {
         if has_mmproj && (vram_vision_model_mib + ram_vision_model_mib) > 0.0 {
-            mmproj_name = Path::new(&mmproj_skeleton_path)
+            mmproj_name = Path::new(&active_mmproj_skeleton)
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -664,7 +721,7 @@ fn run_analyze_blocking(
             mmproj_projector_type = "clip_vision_encoder".to_string();
         } else {
             let vision_cache = VISION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-            let v_key = (mmproj_skeleton_path.clone(), device.clone());
+            let v_key = (active_mmproj_skeleton.clone(), device.clone());
             let cached_v = vision_cache.lock().unwrap().get(&v_key).cloned();
 
             let v_data = if let Some(cv) = cached_v {
@@ -672,7 +729,7 @@ fn run_analyze_blocking(
             } else {
                 let mut cv = CachedVision {
                     has_mmproj: true,
-                    mmproj_name: Path::new(&mmproj_skeleton_path)
+                    mmproj_name: Path::new(&active_mmproj_skeleton)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -687,7 +744,7 @@ fn run_analyze_blocking(
 
                 if isolated_exe.is_file() {
                     if let Ok(iso_out) = Command::new(&isolated_exe)
-                        .args(["-mmproj", &mmproj_skeleton_path, "-dev", &device])
+                        .args(["-m", &target_gguf, "-mmproj", &active_mmproj_skeleton, "-dev", &device])
                         .current_dir(&bin_dir)
                         .creation_flags(CREATE_NO_WINDOW)
                         .output()
@@ -713,7 +770,7 @@ fn run_analyze_blocking(
 
                 // Fallback estimation from file size if isolated tool is unavailable
                 if cv.vram_vision_model_mib == 0.0 && cv.ram_vision_model_mib == 0.0 {
-                    let sz = std::fs::metadata(&mmproj_skeleton_path).map(|m| m.len()).unwrap_or(0);
+                    let sz = std::fs::metadata(&active_mmproj_skeleton).map(|m| m.len()).unwrap_or(0);
                     let mm_mib = ((sz as f64 / (1024.0 * 1024.0)) * 10.0).round() / 10.0;
                     if ngl > 0 {
                         cv.vram_vision_model_mib = mm_mib;
@@ -766,6 +823,9 @@ fn run_analyze_blocking(
         is_moe,
         expert_count,
         expert_used_count,
+        detected_mmproj,
+        detected_mmproj_name,
+        include_vision: include_vision_val,
         has_mmproj,
         mmproj_name,
         mmproj_projector_type,
@@ -809,6 +869,7 @@ async fn analyze_model(
     device: String,
     kv_quant: Option<String>,
     no_kv_offload: Option<bool>,
+    include_vision: Option<bool>,
 ) -> Result<BenchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_analyze_blocking(
@@ -820,6 +881,7 @@ async fn analyze_model(
             device,
             kv_quant,
             no_kv_offload,
+            include_vision,
         )
     })
     .await
@@ -1107,5 +1169,92 @@ mod tests {
         for m in models.iter().take(3) {
             println!("- [{}] {} (arch: {}, size: {:.1} MiB)", m.source, m.name, m.arch, m.model_logical_mib);
         }
+    }
+
+    #[test]
+    fn test_run_analyze_blocking_zero_alloc() {
+        let model = r"E:\llama.cpp study\llama-simulator\skeletons\LFM3-1.7B-Q4_K_M.gguf";
+        let res = run_analyze_blocking(
+            model.to_string(),
+            None,
+            32768,
+            99,
+            None,
+            "cuda".to_string(),
+            Some("q4_0".to_string()),
+            Some(true),
+            Some(true),
+        ).expect("run_analyze_blocking failed");
+        println!("Result: total_vram={:.1}, total_ram={:.1}, ram_kv={:.1}, bench_time={:.1}ms",
+            res.total_vram_mib, res.total_ram_mib, res.ram_kv_mib, res.bench_time_ms);
+        assert!(res.total_vram_mib > 0.0);
+        assert!(res.ram_kv_mib > 0.0);
+    }
+
+    #[test]
+    fn test_vision_projector_include_exclude() {
+        let model = r"E:\llama.cpp study\llama-simulator\skeletons\LFM3-1.7B-Q4_K_M.gguf";
+        let mmproj = r"E:\llama.cpp study\llama-simulator\skeletons\mmproj-BF16.gguf";
+
+        // 1. Vision Included
+        let res_inc = run_analyze_blocking(
+            model.to_string(),
+            Some(mmproj.to_string()),
+            8192,
+            99,
+            None,
+            "cuda".to_string(),
+            Some("f16".to_string()),
+            Some(false),
+            Some(true),
+        ).expect("run with vision included failed");
+
+        assert!(res_inc.detected_mmproj, "Vision projector should be detected");
+        assert!(res_inc.include_vision, "include_vision should be true");
+        assert!(res_inc.has_mmproj, "has_mmproj should be true");
+        assert!(res_inc.vram_vision_model_mib > 0.0 || res_inc.ram_vision_model_mib > 0.0);
+        let vram_with_vision = res_inc.total_vram_mib;
+
+        // 2. Vision Excluded
+        let res_exc = run_analyze_blocking(
+            model.to_string(),
+            Some(mmproj.to_string()),
+            8192,
+            99,
+            None,
+            "cuda".to_string(),
+            Some("f16".to_string()),
+            Some(false),
+            Some(false),
+        ).expect("run with vision excluded failed");
+
+        assert!(res_exc.detected_mmproj, "Vision projector should still be detected");
+        assert!(!res_exc.include_vision, "include_vision should be false");
+        assert!(!res_exc.has_mmproj, "has_mmproj should be false when excluded");
+        assert_eq!(res_exc.vram_vision_model_mib, 0.0);
+        assert_eq!(res_exc.ram_vision_model_mib, 0.0);
+        assert!(res_exc.total_vram_mib < vram_with_vision, "Excluding vision should reduce total VRAM");
+    }
+
+    #[test]
+    fn test_pure_cpu_mode() {
+        let model = r"E:\llama.cpp study\llama-simulator\skeletons\LFM3-1.7B-Q4_K_M.gguf";
+        let res = run_analyze_blocking(
+            model.to_string(),
+            None,
+            16384,
+            0,
+            None,
+            "CPU".to_string(),
+            Some("f16".to_string()),
+            Some(false),
+            Some(false),
+        ).expect("run in CPU mode failed");
+
+        assert_eq!(res.total_vram_mib, 0.0, "Pure CPU mode must have 0.0 VRAM");
+        assert!(res.total_ram_mib > 0.0, "RAM must hold weights and context");
+        assert!(res.ram_model_mib > 0.0, "Model weights must be in RAM");
+        assert!(res.ram_kv_mib > 0.0, "KV cache must be in RAM");
+        assert_eq!(res.ngl, 0, "GPU layers must be 0");
     }
 }

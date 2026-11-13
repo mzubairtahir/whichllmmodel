@@ -88,6 +88,9 @@ interface BenchResult {
   is_moe: boolean;
   expert_count: number;
   expert_used_count: number;
+  detected_mmproj: boolean;
+  detected_mmproj_name: string;
+  include_vision: boolean;
   has_mmproj: boolean;
   mmproj_name: string;
   mmproj_projector_type: string;
@@ -159,6 +162,7 @@ export default function App() {
   const [device, setDevice] = useState("CUDA0");
   const [kvQuant, setKvQuant] = useState<string>("q8_0");
   const [noKvOffload, setNoKvOffload] = useState<boolean>(false);
+  const [includeVision, setIncludeVision] = useState<boolean>(true);
   const [vramBudgetGb, setVramBudgetGb] = useState(16);
   const [vramBwGbs, setVramBwGbs] = useState(26.2);
   const [ramBwGbs, setRamBwGbs] = useState(26.2);
@@ -168,6 +172,14 @@ export default function App() {
   const [result, setResult] = useState<BenchResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [cmdMode, setCmdMode] = useState<"cli" | "server">("cli");
+  const [memoryBaseline, setMemoryBaseline] = useState<"free" | "total">(() => {
+    return (localStorage.getItem("wlm_memory_baseline") as "free" | "total") || "free";
+  });
+
+  const handleSetMemoryBaseline = (b: "free" | "total") => {
+    setMemoryBaseline(b);
+    localStorage.setItem("wlm_memory_baseline", b);
+  };
 
   // System
   const [hwInfo, setHwInfo] = useState<HardwareInfo | null>(null);
@@ -331,7 +343,8 @@ export default function App() {
     moe = ncmoe,
     dev = device,
     quant = kvQuant,
-    noOffload = noKvOffload
+    noOffload = noKvOffload,
+    incVision = includeVision
   ) => {
     if (!target.trim()) return;
     setLoading(true);
@@ -346,8 +359,12 @@ export default function App() {
         device: dev,
         kvQuant: quant,
         noKvOffload: noOffload,
+        includeVision: incVision,
       });
       setResult(res);
+      if (res.detected_mmproj !== undefined) {
+        setIncludeVision(res.include_vision);
+      }
       if (res.hardware) {
         setHwInfo(res.hardware);
         syncBandwidth(res.hardware);
@@ -356,7 +373,7 @@ export default function App() {
       if (nativeCtx > 0 && ctx > nativeCtx) {
         // Requested context exceeds what this model supports: re-check at the model's real maximum.
         setContextSize(nativeCtx);
-        await runCheck(target, mmproj, nativeCtx, layers, moe, dev, quant, noOffload);
+        await runCheck(target, mmproj, nativeCtx, layers, moe, dev, quant, noOffload, incVision);
         return;
       }
       setContextSize(ctx);
@@ -373,18 +390,22 @@ export default function App() {
     setCustomRig(false);
     syncBandwidth(hwInfo, true);
     const discrete = hwInfo.gpu_is_discrete && hwInfo.gpu_vram_total_mib >= 2048;
+    const isMac = (hwInfo.gpu_name || "").toLowerCase().includes("apple");
+    const dev = discrete ? (isMac ? "Metal0" : "CUDA0") : "CPU";
     const layers = discrete ? 99 : 0;
-    setVramBudgetGb(Math.max(1, Math.round((hwInfo.gpu_vram_total_mib || 1024) / 1024)));
+    setDevice(dev);
+    setVramBudgetGb(discrete ? Math.max(1, Math.round((hwInfo.gpu_vram_total_mib || 1024) / 1024)) : 1);
     setNgl(layers);
-    runCheck(urlOrPath, mmprojUrlOrPath, contextSize, layers, ncmoe, device, kvQuant, noKvOffload);
+    runCheck(urlOrPath, mmprojUrlOrPath, contextSize, layers, ncmoe, dev, kvQuant, noKvOffload, includeVision);
   };
 
   const openInCheck = (m: LocalModelEntry) => {
     setUrlOrPath(m.model_path);
     setMmprojUrlOrPath(m.mmproj_path || "");
     setShowVision(Boolean(m.mmproj_path));
+    setIncludeVision(Boolean(m.mmproj_path));
     setPage("check");
-    runCheck(m.model_path, m.mmproj_path || "", contextSize, ngl, ncmoe, device, kvQuant, noKvOffload);
+    runCheck(m.model_path, m.mmproj_path || "", contextSize, ngl, ncmoe, device, kvQuant, noKvOffload, Boolean(m.mmproj_path));
   };
 
   useEffect(() => {
@@ -426,11 +447,27 @@ export default function App() {
     if (!opts.includes(native)) opts.push(native);
     return opts.sort((a, b) => a - b);
   }, [result]);
-  const gpuFits = result ? result.total_vram_mib <= vramBudgetMib : true;
+  const gpuEffectiveLimitMib =
+    memoryBaseline === "free" && hwInfo?.gpu_is_discrete && hwInfo.gpu_vram_free_mib > 0
+      ? hwInfo.gpu_vram_free_mib
+      : vramBudgetMib;
+  const gpuFits = result ? result.total_vram_mib <= gpuEffectiveLimitMib : true;
+  const gpuFitsTotal = result ? result.total_vram_mib <= vramBudgetMib : true;
+
   const ramNeed = result ? result.total_ram_mib + (result.ngl === 0 ? result.total_vram_mib : 0) : 0;
   const ramFree = hwInfo?.ram_free_mib ?? 0;
   const ramTotal = hwInfo?.ram_total_mib ?? 0;
-  const ramState: "ok" | "tight" | "no" = !hwInfo ? "ok" : ramNeed <= ramFree ? "ok" : ramNeed <= ramTotal ? "tight" : "no";
+  const ramState: "ok" | "tight" | "no" = !hwInfo
+    ? "ok"
+    : memoryBaseline === "free"
+    ? ramNeed <= ramFree
+      ? "ok"
+      : ramNeed <= ramTotal
+      ? "tight"
+      : "no"
+    : ramNeed <= ramTotal
+    ? "ok"
+    : "no";
 
   const activeEntry = result
     ? localModels.find((m) => m.model_path.toLowerCase() === result.skeleton_path.toLowerCase())
@@ -455,21 +492,22 @@ export default function App() {
   const activeNgl = result?.ngl ?? ngl;
   const activeNcmoe = result?.ncmoe ?? ncmoe;
   const activeCtx = result?.context_size ?? contextSize;
+  const isCpuMode = result?.device?.toUpperCase() === "CPU" || activeNgl === 0;
 
   const cliCommand = result
     ? `llama-cli -m "${modelFile}"${mmprojFile ? ` --mmproj "${mmprojFile}"` : ""} -ngl ${activeNgl}${
-        activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
+        !isCpuMode && activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
       } -c ${activeCtx} -ub 512 -b 512 -fa on${
         activeKvQuant && activeKvQuant !== "f16" ? ` -ctk ${activeKvQuant} -ctv ${activeKvQuant}` : ""
-      }${activeNoKvOffload ? " -nkvo 1" : ""}`
+      }${!isCpuMode && activeNoKvOffload ? " -nkvo 1" : ""}`
     : "";
 
   const serverCommand = result
     ? `llama-server -m "${modelFile}"${mmprojFile ? ` --mmproj "${mmprojFile}"` : ""} -ngl ${activeNgl}${
-        activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
+        !isCpuMode && activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
       } -c ${activeCtx} -ub 512 -b 512 -fa on${
         activeKvQuant && activeKvQuant !== "f16" ? ` -ctk ${activeKvQuant} -ctv ${activeKvQuant}` : ""
-      }${activeNoKvOffload ? " -nkvo 1" : ""} --port 8080`
+      }${!isCpuMode && activeNoKvOffload ? " -nkvo 1" : ""} --port 8080`
     : "";
 
   const displayedCommand = cmdMode === "server" ? serverCommand : cliCommand;
@@ -682,9 +720,9 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                  <button className="text-muted hover:text-fg cursor-pointer flex items-center gap-1" onClick={() => setShowVision(!showVision)}>
+                  <button className="text-muted hover:text-fg cursor-pointer flex items-center gap-1 text-xs" onClick={() => setShowVision(!showVision)}>
                     <Eye className="w-4 h-4" />
-                    {showVision || mmprojUrlOrPath ? "Hide vision projector" : "Add vision projector"}
+                    {showVision || mmprojUrlOrPath ? "Hide custom vision projector" : "Override or specify custom vision projector"}
                   </button>
                 </div>
                 {(showVision || mmprojUrlOrPath) && (
@@ -692,8 +730,8 @@ export default function App() {
                     className="field"
                     value={mmprojUrlOrPath}
                     onChange={(e) => setMmprojUrlOrPath(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && runCheck()}
-                    placeholder="mmproj GGUF URL or path (optional — detected automatically for most repos)"
+                    onKeyDown={(e) => e.key === "Enter" && runCheck(urlOrPath, e.currentTarget.value, contextSize, ngl, ncmoe, device, kvQuant, noKvOffload, true)}
+                    placeholder="mmproj GGUF URL or path (optional — auto-detected for vision models)"
                   />
                 )}
               </section>
@@ -714,14 +752,17 @@ export default function App() {
                       }))}
                       onChange={(v) => {
                         setContextSize(v);
-                        runCheck(urlOrPath, mmprojUrlOrPath, v, ngl, ncmoe, device, kvQuant, noKvOffload);
+                        runCheck(urlOrPath, mmprojUrlOrPath, v, ngl, ncmoe, device, kvQuant, noKvOffload, includeVision);
                       }}
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <div className="label">GPU layers</div>
+                    <div className="label">
+                      GPU layers
+                      {device === "CPU" && <span className="font-normal text-muted"> · CPU mode (0 GPU layers)</span>}
+                    </div>
                     <Seg
-                      value={ngl}
+                      value={device === "CPU" ? 0 : ngl}
                       options={[
                         { v: 99, label: "All" },
                         { v: 20, label: "20" },
@@ -729,8 +770,10 @@ export default function App() {
                         { v: 0, label: "None (CPU)" },
                       ]}
                       onChange={(v) => {
+                        const newDev = v === 0 ? "CPU" : (device === "CPU" ? "CUDA0" : device);
+                        setDevice(newDev);
                         setNgl(v);
-                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, v, ncmoe, device, kvQuant, noKvOffload);
+                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, v, ncmoe, newDev, kvQuant, noKvOffload, includeVision);
                       }}
                     />
                   </div>
@@ -748,7 +791,7 @@ export default function App() {
                       ]}
                       onChange={(v) => {
                         setKvQuant(v);
-                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, v, noKvOffload);
+                        runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, v, noKvOffload, includeVision);
                       }}
                     />
                   </div>
@@ -766,47 +809,77 @@ export default function App() {
                         ]}
                         onChange={(v) => {
                           setNcmoe(v);
-                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, v, device, kvQuant, noKvOffload);
+                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, v, device, kvQuant, noKvOffload, includeVision);
                         }}
                       />
                     </div>
                   )}
                   <div className="space-y-1.5">
-                    <div className="label">Target hardware</div>
-                    <div className="flex gap-2 flex-wrap">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="label">Target hardware</div>
+                      <div className="inline-flex rounded-md border border-line bg-bg p-0.5 text-xs">
+                        <button
+                          type="button"
+                          className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                            memoryBaseline === "free" ? "bg-surface text-fg shadow-sm border border-line font-semibold" : "text-muted hover:text-fg"
+                          }`}
+                          onClick={() => handleSetMemoryBaseline("free")}
+                          title="Evaluate fit against free, currently available RAM and VRAM"
+                        >
+                          Free memory
+                        </button>
+                        <button
+                          type="button"
+                          className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                            memoryBaseline === "total" ? "bg-surface text-fg shadow-sm border border-line font-semibold" : "text-muted hover:text-fg"
+                          }`}
+                          onClick={() => handleSetMemoryBaseline("total")}
+                          title="Evaluate fit against total installed hardware capacity"
+                        >
+                          Full capacity
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 flex-wrap items-center">
                       <select
                         className="field !w-auto !py-1.5"
                         value={device}
                         onChange={(e) => {
-                          setDevice(e.target.value);
-                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, e.target.value, kvQuant, noKvOffload);
+                          const newDev = e.target.value;
+                          setDevice(newDev);
+                          const newNgl = newDev === "CPU" ? 0 : (ngl === 0 ? 99 : ngl);
+                          if (newDev === "CPU") setNgl(0);
+                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, newNgl, ncmoe, newDev, kvQuant, noKvOffload, includeVision);
                         }}
                       >
                         <option value="CUDA0">NVIDIA CUDA</option>
                         <option value="Metal0">Apple Metal</option>
+                        <option value="CPU">CPU Only (System RAM)</option>
                       </select>
-                      <select
-                        className="field !w-auto !py-1.5"
-                        value={vramBudgetGb}
-                        onChange={(e) => {
-                          const gb = Number(e.target.value);
-                          setVramBudgetGb(gb);
-                          if (gb <= 1) {
-                            setCustomRig(false);
-                            setVramBwGbs(hwInfo?.measured_ram_gbs || ramBwGbs);
-                          } else {
-                            setCustomRig(true);
-                            setVramBwGbs(gb <= 4 ? 192 : gb <= 8 ? 320 : gb <= 12 ? 504 : gb <= 16 ? 672 : gb <= 24 ? 1008 : 1500);
-                          }
-                        }}
-                      >
-                        <option value={1}>Integrated GPU (shared RAM)</option>
-                        {[4, 8, 12, 16, 24, 32, 64].map((g) => (
-                          <option key={g} value={g}>
-                            {g} GB VRAM
-                          </option>
-                        ))}
-                      </select>
+                      {device !== "CPU" && (
+                        <select
+                          className="field !w-auto !py-1.5"
+                          value={vramBudgetGb}
+                          onChange={(e) => {
+                            const gb = Number(e.target.value);
+                            setVramBudgetGb(gb);
+                            if (gb <= 1) {
+                              setCustomRig(false);
+                              setVramBwGbs(hwInfo?.measured_ram_gbs || ramBwGbs);
+                            } else {
+                              setCustomRig(true);
+                              setVramBwGbs(gb <= 4 ? 192 : gb <= 8 ? 320 : gb <= 12 ? 504 : gb <= 16 ? 672 : gb <= 24 ? 1008 : 1500);
+                            }
+                          }}
+                        >
+                          <option value={1}>Integrated GPU (shared RAM)</option>
+                          {[4, 8, 12, 16, 24, 32, 64].map((g) => (
+                            <option key={g} value={g}>
+                              {g} GB VRAM
+                            </option>
+                          ))}
+                        </select>
+                      )}
                       {hwInfo && (
                         <button className="btn !py-1.5" onClick={useMyHardware}>
                           Use my hardware
@@ -814,22 +887,49 @@ export default function App() {
                       )}
                     </div>
                   </div>
-                  <div className="space-y-1.5 md:col-span-2 pt-2 border-t border-line/50">
-                    <label className="flex items-center gap-2.5 cursor-pointer select-none text-xs text-fg">
-                      <input
-                        type="checkbox"
-                        checked={noKvOffload}
-                        onChange={(e) => {
-                          const val = e.target.checked;
-                          setNoKvOffload(val);
-                          runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, kvQuant, val);
-                        }}
-                        className="rounded border-line text-accent focus:ring-0 cursor-pointer h-4 w-4"
-                      />
-                      <span className="font-medium">Store context in System RAM instead of GPU VRAM</span>
-                      <span className="text-muted">(frees GPU graphics memory so you can fit larger models or more layers)</span>
-                    </label>
-                  </div>
+                  {device !== "CPU" && (
+                    <div className="space-y-1.5 md:col-span-2 pt-2 border-t border-line/50">
+                      <label className="flex items-center gap-2.5 cursor-pointer select-none text-xs text-fg">
+                        <input
+                          type="checkbox"
+                          checked={noKvOffload}
+                          onChange={(e) => {
+                            const val = e.target.checked;
+                            setNoKvOffload(val);
+                            runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, kvQuant, val, includeVision);
+                          }}
+                          className="rounded border-line text-accent focus:ring-0 cursor-pointer h-4 w-4"
+                        />
+                        <span className="font-medium">Store context in System RAM instead of GPU VRAM</span>
+                        <span className="text-muted">(frees GPU graphics memory so you can fit larger models or more layers)</span>
+                      </label>
+                    </div>
+                  )}
+                  {result?.detected_mmproj && (
+                    <div className="space-y-1.5 md:col-span-2 pt-2 border-t border-line/50">
+                      <label className="flex items-center justify-between cursor-pointer select-none text-xs text-fg p-2.5 rounded-lg bg-surface border border-line hover:border-accent/40 transition-colors">
+                        <div className="flex items-center gap-2.5">
+                          <input
+                            type="checkbox"
+                            checked={includeVision}
+                            onChange={(e) => {
+                              const val = e.target.checked;
+                              setIncludeVision(val);
+                              runCheck(urlOrPath, mmprojUrlOrPath, contextSize, ngl, ncmoe, device, kvQuant, noKvOffload, val);
+                            }}
+                            className="rounded border-line text-accent focus:ring-0 cursor-pointer h-4 w-4"
+                          />
+                          <div>
+                            <span className="font-medium text-sm">
+                              {includeVision ? "Include vision projector in memory" : "Exclude vision projector (run as text-only model)"}
+                            </span>
+                            
+                          </div>
+                        </div>
+                        
+                      </label>
+                    </div>
+                  )}
                 </div>
               </section>
 
@@ -858,6 +958,23 @@ export default function App() {
                         {result.arch} · {result.is_moe ? `Mixture of experts (${result.expert_used_count || 4} of ${result.expert_count} active)` : "Dense"} · up to{" "}
                         {Math.round(result.native_context_length / 1024)}K context
                       </div>
+                      {result.detected_mmproj ? (
+                        <div className="flex items-center gap-2 mt-2 flex-wrap">
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-accent/10 border border-accent/30 text-accent">
+                            <Eye className="w-3.5 h-3.5" />
+                            Vision projector: <strong className="font-mono">{result.detected_mmproj_name}</strong>
+                          </span>
+                          <span className={`text-[11px] px-2 py-0.5 rounded font-mono font-medium ${
+                            result.include_vision ? "bg-ok/10 text-ok border border-ok/30" : "bg-muted/10 text-muted border border-muted/30"
+                          }`}>
+                            {result.include_vision ? "Active (In memory)" : "Excluded (Text-only)"}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-muted mt-1">
+                          Text-only model (no vision projector detected)
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       {!result.is_local_model && isRemote && (
@@ -889,30 +1006,86 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Summary cards header & selection */}
+                  <div className="flex items-center justify-between gap-3 flex-wrap pt-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">
+                     
+                    </span>
+                    <div className="flex items-center gap-1.5 text-xs">
+                      
+                      <div className="inline-flex rounded-md border border-line bg-surface p-0.5">
+                        <button
+                          type="button"
+                          className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
+                            memoryBaseline === "free" ? "bg-accent text-white font-medium shadow-sm" : "text-muted hover:text-fg"
+                          }`}
+                          onClick={() => handleSetMemoryBaseline("free")}
+                          title="Evaluate fit against free, unallocated RAM and VRAM available right now"
+                        >
+                          Free memory ({hwInfo ? `${(hwInfo.ram_free_mib / 1024).toFixed(1)} GiB` : "Live"})
+                        </button>
+                        <button
+                          type="button"
+                          className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
+                            memoryBaseline === "total" ? "bg-accent text-white font-medium shadow-sm" : "text-muted hover:text-fg"
+                          }`}
+                          onClick={() => handleSetMemoryBaseline("total")}
+                          title="Evaluate fit against total installed hardware capacity"
+                        >
+                          Full capacity ({hwInfo ? `${(hwInfo.ram_total_mib / 1024).toFixed(1)} GiB` : "Total"})
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Summary cards */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="rounded-lg border border-line bg-surface p-4">
-                      <div className="label">GPU memory</div>
-                      <div className="text-2xl font-semibold mt-1">{fmtGib(result.total_vram_mib)}</div>
-                      <div className={`text-sm mt-1 ${gpuFits ? "text-ok" : "text-bad"}`}>
-                        {result.total_vram_mib === 0
-                          ? "Not used"
+                      <div className="flex items-center justify-between">
+                        <div className="label">GPU memory</div>
+                        <span className="text-[10px] uppercase font-mono text-muted">
+                          {result.device?.toUpperCase() === "CPU" ? "CPU Mode" : memoryBaseline === "free" ? "Free VRAM" : "Full VRAM"}
+                        </span>
+                      </div>
+                      <div className="text-2xl font-semibold mt-1">
+                        {result.device?.toUpperCase() === "CPU" || result.total_vram_mib === 0
+                          ? "0 GiB"
+                          : fmtGib(result.total_vram_mib)}
+                      </div>
+                      <div className={`text-sm mt-1 ${result.device?.toUpperCase() === "CPU" || result.total_vram_mib === 0 ? "text-ok" : gpuFits ? "text-ok" : gpuFitsTotal ? "text-warn" : "text-bad"}`}>
+                        {result.device?.toUpperCase() === "CPU" || result.total_vram_mib === 0
+                          ? "Pure CPU execution · 0 MB VRAM needed"
+                          : memoryBaseline === "free" && hwInfo?.gpu_is_discrete && hwInfo.gpu_vram_free_mib > 0
+                          ? gpuFits
+                            ? `Fits in ${(hwInfo.gpu_vram_free_mib / 1024).toFixed(1)} GiB free VRAM`
+                            : gpuFitsTotal
+                            ? `Exceeds free VRAM · Fits in ${(hwInfo.gpu_vram_total_mib / 1024).toFixed(1)} GiB if other apps close`
+                            : `Exceeds total ${(hwInfo.gpu_vram_total_mib / 1024).toFixed(1)} GiB VRAM by ${fmtGib(result.total_vram_mib - hwInfo.gpu_vram_total_mib)}`
                           : gpuFits
-                          ? `Fits in ${vramBudgetGb} GB`
-                          : `Exceeds ${vramBudgetGb} GB by ${fmtGib(result.total_vram_mib - vramBudgetMib)}`}
+                          ? `Fits in ${vramBudgetGb} GB full capacity`
+                          : `Exceeds ${vramBudgetGb} GB total by ${fmtGib(result.total_vram_mib - vramBudgetMib)}`}
                       </div>
                     </div>
                     <div className="rounded-lg border border-line bg-surface p-4">
-                      <div className="label">System RAM</div>
+                      <div className="flex items-center justify-between">
+                        <div className="label">System RAM</div>
+                        <span className="text-[10px] uppercase font-mono text-muted">
+                          {memoryBaseline === "free" ? "Free RAM" : "Full RAM"}
+                        </span>
+                      </div>
                       <div className="text-2xl font-semibold mt-1">{fmtGib(ramNeed)}</div>
                       <div className={`text-sm mt-1 ${ramState === "ok" ? "text-ok" : ramState === "tight" ? "text-warn" : "text-bad"}`}>
                         {!hwInfo
                           ? ""
+                          : memoryBaseline === "free"
+                          ? ramState === "ok"
+                            ? `Fits in ${(ramFree / 1024).toFixed(1)} GiB free RAM`
+                            : ramState === "tight"
+                            ? `Exceeds free RAM by ${fmtGib(ramNeed - ramFree)} · Fits in ${(ramTotal / 1024).toFixed(1)} GiB total if other apps close`
+                            : `Exceeds installed ${(ramTotal / 1024).toFixed(1)} GiB RAM by ${fmtGib(ramNeed - ramTotal)}`
                           : ramState === "ok"
-                          ? `Fits in ${(ramFree / 1024).toFixed(1)} GiB free`
-                          : ramState === "tight"
-                          ? "Fits only if you close other apps"
-                          : `More than the ${(ramTotal / 1024).toFixed(1)} GiB installed`}
+                          ? `Fits in ${(ramTotal / 1024).toFixed(1)} GiB installed capacity`
+                          : `Exceeds ${(ramTotal / 1024).toFixed(1)} GiB installed RAM by ${fmtGib(ramNeed - ramTotal)}`}
                       </div>
                     </div>
                     <div className="rounded-lg border border-line bg-surface p-4">
@@ -988,7 +1161,7 @@ export default function App() {
                         </span>
                         <span>·</span>
                         <span>
-                          llama-bench simulation: <strong className="text-ok">{result.bench_time_ms.toFixed(0)} ms</strong>
+                          llama.cpp reservation: <strong className="text-ok">{result.bench_time_ms.toFixed(0)} ms</strong>
                         </span>
                         <span>·</span>
                         <span>
@@ -1151,7 +1324,17 @@ export default function App() {
                     {visibleModels.map((m) => {
                       const disk = m.model_disk_mib + m.mmproj_disk_mib;
                       const need = m.model_logical_mib + m.mmproj_logical_mib + 250;
-                      const fits = !hwInfo ? "ok" : need <= hwInfo.ram_free_mib ? "ok" : need <= hwInfo.ram_total_mib ? "tight" : "no";
+                      const fits = !hwInfo
+                        ? "ok"
+                        : memoryBaseline === "free"
+                        ? need <= hwInfo.ram_free_mib
+                          ? "ok"
+                          : need <= hwInfo.ram_total_mib
+                          ? "tight"
+                          : "no"
+                        : need <= hwInfo.ram_total_mib
+                        ? "ok"
+                        : "no";
                       let ratio = 1;
                       if (m.is_moe && m.expert_count > 0) ratio = Math.min(1, 0.1 + 0.9 * ((m.expert_used_count || 4) / m.expert_count));
                       const ts = Math.round((ramBwGbs / Math.max(0.05, (m.model_logical_mib / 1024) * ratio)) * 10) / 10;
