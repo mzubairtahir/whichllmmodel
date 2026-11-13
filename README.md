@@ -1,6 +1,6 @@
 # whichllmmodel
 
-> **Zero-download memory & speed hardware simulator for llama.cpp.**  
+>**Zero-weights-download memory simulator for llama.cpp.**  
 > Know if an LLM will fit your GPU or RAM before downloading 20 GB of weights.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -9,7 +9,9 @@
 
 ---
 
-## ⚡ What is whichllmmodel?
+## What is whichllmmodel?
+
+The goal of this project is to make finding and using local models easy and democratizing local AI.
 
 Downloading large models (10 GB – 70 GB) just to find out they cause Out-Of-Memory (`OOM`) or crawl at 1 token per second wastes hours of time and bandwidth.
 
@@ -29,9 +31,7 @@ Downloading large models (10 GB – 70 GB) just to find out they cause Out-Of-Me
   * Auto-discovers installed GGUF models across **Ollama**, **LM Studio**, and **Hugging Face cache**.
   * Shows exact physical disk usage (accounting for Windows NTFS sparse files & multi-part shards).
   * Tag, categorize (`Coding`, `General`, `Reasoning`, `Vision`, `Fast / Edge`), and delete models with one click.
-* 🧹 **Ephemeral Session Skeletons:**
-  * Remote Hugging Face model checks are stored in the OS temp directory and automatically purged on exit.
-* ☀️ **Clean Light / Dark Mode.**
+
 
 ---
 
@@ -64,18 +64,16 @@ npm run tauri build
 
 ---
 
-## 🛠️ Architecture
+## Methodology
 
-`whichllmmodel` does not approximate or guess memory formulas in JavaScript. Instead, it pairs a modern React + Tailwind UI with a Rust backend that drives upstream `llama.cpp` binaries (`llama-bench` & `isolated-reserve`) compiled with the Null-Backend (`Null-CUDA` & `Null-Metal`).
+`whichllmmodel` does not approximate or guess memory formulas in JavaScript. Instead, it pairs a modern React + Tailwind UI with a Rust backend that drives upstream `llama.cpp` binaries (`llama-bench` & `isolated-reserve`) compiled with the Null-Backend (`Null-CUDA` & `Null-Metal`), to calculate actual numbers.
 
-```
-whichllmmodel/
-├── src/                <-- React UI (Memory check, hardware detector, library)
-├── src-tauri/
-│   ├── bin/            <-- Bundled llama.cpp null-backend binaries & DLLs
-│   ├── src/main.rs     <-- Rust backend FFI & process orchestrator
-│   └── tauri.conf.json <-- Tauri v2 configuration
-```
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please open an issue for any new ideas, feature requests, or bug fixes.
 
 ---
 

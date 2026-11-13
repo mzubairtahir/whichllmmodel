@@ -1,6 +1,6 @@
 [package]
 name = "whichllmmodel"
-version = "1.0.0"
+version = "1.1.0"
 description = "whichllmmodel - Zero-Download Hardware Simulator Desktop App"
 authors = ["whichllmmodel"]
 edition = "2021"

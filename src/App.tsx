@@ -489,13 +489,34 @@ export default function App() {
       : `${result.mmproj_name}.gguf`
     : "";
 
+  const hfMatch =
+    result && !result.is_local_model
+      ? result.resolved_url.match(/^https?:\/\/huggingface\.co\/([^/]+\/[^/]+)\/(?:resolve|blob)\/[^/]+\/(.+)$/i)
+      : null;
+
+  const modelSourceArg = result
+    ? hfMatch
+      ? `-hf ${hfMatch[1]} -hff "${hfMatch[2]}"`
+      : `-m "${result.is_local_model ? result.resolved_url || result.skeleton_path : modelFile}"`
+    : "";
+
+  const mmprojSourceArg = result
+    ? hfMatch
+      ? result.detected_mmproj && !result.include_vision
+        ? " --no-mmproj"
+        : ""
+      : mmprojFile
+      ? ` --mmproj "${activeEntry?.mmproj_path || mmprojFile}"`
+      : ""
+    : "";
+
   const activeNgl = result?.ngl ?? ngl;
   const activeNcmoe = result?.ncmoe ?? ncmoe;
   const activeCtx = result?.context_size ?? contextSize;
   const isCpuMode = result?.device?.toUpperCase() === "CPU" || activeNgl === 0;
 
   const cliCommand = result
-    ? `llama-cli -m "${modelFile}"${mmprojFile ? ` --mmproj "${mmprojFile}"` : ""} -ngl ${activeNgl}${
+    ? `llama-cli ${modelSourceArg}${mmprojSourceArg} -ngl ${activeNgl}${
         !isCpuMode && activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
       } -c ${activeCtx} -ub 512 -b 512 -fa on${
         activeKvQuant && activeKvQuant !== "f16" ? ` -ctk ${activeKvQuant} -ctv ${activeKvQuant}` : ""
@@ -503,7 +524,7 @@ export default function App() {
     : "";
 
   const serverCommand = result
-    ? `llama-server -m "${modelFile}"${mmprojFile ? ` --mmproj "${mmprojFile}"` : ""} -ngl ${activeNgl}${
+    ? `llama-server ${modelSourceArg}${mmprojSourceArg} -ngl ${activeNgl}${
         !isCpuMode && activeNcmoe > 0 ? ` -ncmoe ${activeNcmoe}` : ""
       } -c ${activeCtx} -ub 512 -b 512 -fa on${
         activeKvQuant && activeKvQuant !== "f16" ? ` -ctk ${activeKvQuant} -ctv ${activeKvQuant}` : ""
