@@ -1,7 +1,7 @@
 # whichllmmodel
 
->**Plan and deploy a private OpenAI-compatible AI server in minutes—on your PC or the cheapest cloud GPU guaranteed to fit.**  
-> Know exact VRAM/RAM for any Hugging Face GGUF and concurrency level (`-np`) without downloading weights first.
+>**Plan and deploy a private OpenAI-compatible AI server on the cloud in minutes.**  
+> Simulate exact VRAM for your model, context, and concurrent users (`-np`), pick the cheapest cloud GPU guaranteed to fit, and deploy in one click.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)
@@ -11,30 +11,24 @@
 
 ## What is whichllmmodel?
 
-The goal of this project is to make finding and using local models easy and democratizing local AI.
+The goal of this project is to make deploying and running your own **private AI server in the cloud** effortless—no DevOps, SSH debugging, or GPU guesswork.
 
-Downloading large models (10 GB – 70 GB) just to find out they cause Out-Of-Memory (`OOM`) or crawl at 1 token per second wastes hours of time and bandwidth.
+While plenty of tools exist for running small models on a local PC, spinning up a **private, multi-user cloud AI API** still forces you to guess which GPU to rent, overpay for oversized VRAM, or hit Out-Of-Memory (`OOM`) crashes after waiting 15 minutes for weights to download.
 
-`whichllmmodel` connects directly to upstream `llama.cpp` using **zero-weight null-backend reservation**. It downloads only the first few megabytes of header metadata via HTTP Range requests and computes **100% byte-accurate memory requirements** in under two seconds.
+`whichllmmodel` solves this using upstream `llama.cpp` **zero-weight null-backend reservation**. It fetches only GGUF header metadata via HTTP Range requests, computes **100% byte-accurate VRAM requirements** for your exact context length and concurrency (`-np`), matches the cheapest fitting cloud GPU, and launches a ready-to-use OpenAI-compatible `llama-server` endpoint in one click.
 
 ### Key Features:
 * ☁️ **1-Click Private AI Server Deployment (`Deploy`):**
   * Simulate exact VRAM for your **context per user** and **concurrent users (`-np`)** before renting any GPU.
   * Rank live cloud GPUs (starting with **RunPod**) to highlight the **Cheapest Guaranteed Fit** without OOMs or overpaying.
   * Review final pod settings & disk size, deploy `llama-server` in one click, and get a private HTTPS OpenAI-compatible `/v1` endpoint + Bearer key with live readiness polling and Stop/Terminate controls.
-* 🎯 **Byte-Accurate Memory Prediction:** Uses `llama-bench` and `isolated-reserve` to get exact allocations for:
+* 🎯 **Byte-Accurate Memory Prediction:** Uses `isolated-reserve` (upstream `llama.cpp`) to compute exact allocations for:
   * Model Weights (GPU VRAM vs Host RAM offloading splits with `-ngl`)
-  * KV Cache at exact context sizes (`-c 4096`, `8192`, `32768`, etc.)
-  * Recurrent State (`RS`) buffers for hybrid architectures (e.g. Qwen 3.5/3.6, LFM)
+  * KV Cache at exact context sizes (`-c 4096`, `8192`, `32768`, `131072`, etc.) and KV quant (`f16`, `q8_0`, `q4_0`)
+  * Recurrent State (`RS`) buffers scaled by concurrent users (`-np`) for hybrid architectures (e.g. Qwen 3.5/3.6, LFM)
   * Peak Compute Buffers (`ggml-gallocr`)
-  * Vision Projectors (`--mmproj`) for Multimodal / VLMs (CLIP weights + compute staging)
-* ⚡ **Streaming Bandwidth Speed Estimator:**
-  * Runs a 16-pass memory streaming benchmark on your actual system hardware.
-  * Estimates exact tokens/second generation speed ($\pm 15\%$ uncertainty tier) without guessing.
-* 📦 **My Models (Local Model Manager):**
-  * Auto-discovers installed GGUF models across **Ollama**, **LM Studio**, and **Hugging Face cache**.
-  * Shows exact physical disk usage (accounting for Windows NTFS sparse files & multi-part shards).
-  * Tag, categorize (`Coding`, `General`, `Reasoning`, `Vision`, `Fast / Edge`), and delete models with one click.
+  * Vision Projectors (`--mmproj`) for Multimodal / VLMs
+
 
 
 ---

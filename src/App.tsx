@@ -613,45 +613,15 @@ export default function App() {
           </div>
           <nav className="space-y-1">
             <NavItem id="deploy" icon={<Cloud className="w-4 h-4" />} label="Deploy" />
-            <NavItem id="check" icon={<Gauge className="w-4 h-4" />} label="Memory check" />
-            <NavItem id="models" icon={<Library className="w-4 h-4" />} label="My models" count={installed.length} />
+            <NavItem id="check" icon={<Gauge className="w-4 h-4" />} label="Local fit" />
           </nav>
         </div>
 
         <div className="space-y-3">
-          {hwInfo && (
-            <div className="rounded-md border border-line p-3 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-muted uppercase tracking-wide text-[10px]">This computer</span>
-                <button onClick={refreshHardware} title="Refresh" className="text-muted hover:text-fg cursor-pointer">
-                  <RefreshCw className={`w-3 h-3 ${refreshingHw ? "animate-spin" : ""}`} />
-                </button>
-              </div>
-              <div className="truncate" title={hwInfo.cpu_name}>
-                <span className="text-muted">CPU </span>
-                {hwInfo.cpu_name.replace("Intel(R) Core(TM) ", "")}
-              </div>
-              <div className="truncate" title={hwInfo.gpu_name}>
-                <span className="text-muted">GPU </span>
-                {hwInfo.gpu_name}
-              </div>
-              <div>
-                <span className="text-muted">Memory bandwidth </span>
-                {(hwInfo.measured_ram_gbs || hwInfo.ram_bandwidth_gbs).toFixed(1)} GB/s
-              </div>
-              <div>
-                <div className="flex justify-between">
-                  <span className="text-muted">Free RAM</span>
-                  <span>
-                    {(hwInfo.ram_free_mib / 1024).toFixed(1)} / {(hwInfo.ram_total_mib / 1024).toFixed(1)} GiB
-                  </span>
-                </div>
-                <div className="mt-1 h-1 rounded-full bg-raised overflow-hidden">
-                  <div className="h-full bg-accent" style={{ width: `${Math.min(100, hwInfo.ram_load_pct)}%` }} />
-                </div>
-              </div>
-            </div>
-          )}
+          <div className="rounded-md border border-line bg-bg/50 p-3 text-xs space-y-1">
+            <div className="font-medium text-fg">Cloud AI Deployer</div>
+            <div className="text-muted">Zero-weight llama.cpp sizing · Private OpenAI API</div>
+          </div>
           <button onClick={toggleTheme} className="btn w-full">
             {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             {theme === "dark" ? "Light mode" : "Dark mode"}
