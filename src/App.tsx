@@ -17,7 +17,9 @@ import {
   Check,
   Search,
   Eye,
+  Cloud,
 } from "lucide-react";
+import RunPodDeploy from "./components/RunPodDeploy";
 
 const DEFAULT_CATEGORIES = ["General", "Coding", "Reasoning", "Vision", "Fast / Edge"];
 
@@ -149,7 +151,7 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     localStorage.getItem("wlm_theme") === "light" ? "light" : "dark"
   );
-  const [page, setPage] = useState<"check" | "models">("check");
+  const [page, setPage] = useState<"check" | "models" | "deploy">("deploy");
 
   // Check-memory state
   const [urlOrPath, setUrlOrPath] = useState("");
@@ -583,7 +585,7 @@ export default function App() {
     </div>
   );
 
-  const NavItem = ({ id, icon, label, count }: { id: "check" | "models"; icon: React.ReactNode; label: string; count?: number }) => (
+  const NavItem = ({ id, icon, label, count }: { id: "check" | "models" | "deploy"; icon: React.ReactNode; label: string; count?: number }) => (
     <button
       onClick={() => setPage(id)}
       className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-md text-sm cursor-pointer ${
@@ -610,6 +612,7 @@ export default function App() {
             <span className="text-base font-semibold tracking-tight">whichllmmodel</span>
           </div>
           <nav className="space-y-1">
+            <NavItem id="deploy" icon={<Cloud className="w-4 h-4" />} label="Deploy" />
             <NavItem id="check" icon={<Gauge className="w-4 h-4" />} label="Memory check" />
             <NavItem id="models" icon={<Library className="w-4 h-4" />} label="My models" count={installed.length} />
           </nav>
@@ -1445,6 +1448,16 @@ export default function App() {
                 </div>
               </div>
             </>
+          )}
+
+          {/* ================= DEPLOY (RUNPOD) ================= */}
+          {page === "deploy" && (
+            <RunPodDeploy
+              initialUrl={urlOrPath}
+              initialResult={result && !result.is_local_model ? result : null}
+              initialKvQuant={kvQuant}
+              initialIncludeVision={includeVision}
+            />
           )}
         </div>
       </main>

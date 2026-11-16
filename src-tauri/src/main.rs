@@ -5,6 +5,7 @@ mod downloader;
 mod gguf;
 mod hf;
 mod hw;
+mod runpod;
 mod scanner;
 
 use downloader::DownloadStatus;
@@ -350,9 +351,11 @@ fn run_analyze_blocking(
     kv_quant: Option<String>,
     no_kv_offload: Option<bool>,
     include_vision: Option<bool>,
+    parallel_slots: Option<u32>,
 ) -> Result<BenchResult, String> {
     let start_time = Instant::now();
     let ncmoe_val = ncmoe.unwrap_or(0);
+    let parallel_val = parallel_slots.unwrap_or(1).max(1);
     let mmproj_arg = mmproj_url_or_path.unwrap_or_default().trim().to_string();
     let kv_quant_val = kv_quant.unwrap_or_else(|| "f16".to_string());
     let no_kv_offload_val = no_kv_offload.unwrap_or(false);
@@ -484,6 +487,11 @@ fn run_analyze_blocking(
         if ncmoe_val > 0 {
             iso_args.push("-ncmoe".to_string());
             iso_args.push(ncmoe_val.to_string());
+        }
+
+        if parallel_val > 1 {
+            iso_args.push("-np".to_string());
+            iso_args.push(parallel_val.to_string());
         }
 
         if kv_quant_val == "q8_0" || kv_quant_val == "q4_0" {
@@ -870,6 +878,7 @@ async fn analyze_model(
     kv_quant: Option<String>,
     no_kv_offload: Option<bool>,
     include_vision: Option<bool>,
+    parallel_slots: Option<u32>,
 ) -> Result<BenchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_analyze_blocking(
@@ -882,6 +891,7 @@ async fn analyze_model(
             kv_quant,
             no_kv_offload,
             include_vision,
+            parallel_slots,
         )
     })
     .await
@@ -1086,6 +1096,55 @@ fn clean_session_skeletons() {
     }
 }
 
+#[tauri::command]
+async fn fetch_runpod_gpus_cmd(api_key: Option<String>) -> Result<Vec<runpod::RunPodGpuType>, String> {
+    tauri::async_runtime::spawn_blocking(move || runpod::fetch_runpod_gpus(api_key))
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn deploy_runpod_pod_cmd(
+    req: runpod::RunPodDeployRequest,
+) -> Result<runpod::RunPodDeployResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || runpod::deploy_runpod_pod(req))
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn list_runpod_pods_cmd(api_key: String) -> Result<Vec<runpod::RunPodPodInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || runpod::list_runpod_pods(api_key))
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn stop_runpod_pod_cmd(api_key: String, pod_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || runpod::stop_runpod_pod(api_key, pod_id))
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn terminate_runpod_pod_cmd(api_key: String, pod_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || runpod::terminate_runpod_pod(api_key, pod_id))
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn test_runpod_endpoint_cmd(
+    endpoint_url: String,
+    server_api_key: String,
+) -> Result<runpod::RunPodTestResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        runpod::test_runpod_endpoint(endpoint_url, server_api_key)
+    })
+    .await
+    .map_err(|e| format!("Task panicked: {}", e))?
+}
+
 fn main() {
     // Clean any leftover ephemeral skeletons from previous sessions on startup
     clean_session_skeletons();
@@ -1099,7 +1158,13 @@ fn main() {
             delete_local_model,
             start_model_download,
             get_download_status,
-            cancel_model_download
+            cancel_model_download,
+            fetch_runpod_gpus_cmd,
+            deploy_runpod_pod_cmd,
+            list_runpod_pods_cmd,
+            stop_runpod_pod_cmd,
+            terminate_runpod_pod_cmd,
+            test_runpod_endpoint_cmd
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -1184,6 +1249,7 @@ mod tests {
             Some("q4_0".to_string()),
             Some(true),
             Some(true),
+            None,
         ).expect("run_analyze_blocking failed");
         println!("Result: total_vram={:.1}, total_ram={:.1}, ram_kv={:.1}, bench_time={:.1}ms",
             res.total_vram_mib, res.total_ram_mib, res.ram_kv_mib, res.bench_time_ms);
@@ -1207,6 +1273,7 @@ mod tests {
             Some("f16".to_string()),
             Some(false),
             Some(true),
+            None,
         ).expect("run with vision included failed");
 
         assert!(res_inc.detected_mmproj, "Vision projector should be detected");
@@ -1226,6 +1293,7 @@ mod tests {
             Some("f16".to_string()),
             Some(false),
             Some(false),
+            None,
         ).expect("run with vision excluded failed");
 
         assert!(res_exc.detected_mmproj, "Vision projector should still be detected");
@@ -1249,6 +1317,7 @@ mod tests {
             Some("f16".to_string()),
             Some(false),
             Some(false),
+            None,
         ).expect("run in CPU mode failed");
 
         assert_eq!(res.total_vram_mib, 0.0, "Pure CPU mode must have 0.0 VRAM");

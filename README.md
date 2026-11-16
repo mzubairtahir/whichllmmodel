@@ -1,7 +1,7 @@
 # whichllmmodel
 
->**Zero-weights-download memory simulator for llama.cpp.**  
-> Know if an LLM will fit your GPU or RAM before downloading 20 GB of weights.
+>**Plan and deploy a private OpenAI-compatible AI server in minutes—on your PC or the cheapest cloud GPU guaranteed to fit.**  
+> Know exact VRAM/RAM for any Hugging Face GGUF and concurrency level (`-np`) without downloading weights first.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)
@@ -18,6 +18,10 @@ Downloading large models (10 GB – 70 GB) just to find out they cause Out-Of-Me
 `whichllmmodel` connects directly to upstream `llama.cpp` using **zero-weight null-backend reservation**. It downloads only the first few megabytes of header metadata via HTTP Range requests and computes **100% byte-accurate memory requirements** in under two seconds.
 
 ### Key Features:
+* ☁️ **1-Click Private AI Server Deployment (`Deploy`):**
+  * Simulate exact VRAM for your **context per user** and **concurrent users (`-np`)** before renting any GPU.
+  * Rank live cloud GPUs (starting with **RunPod**) to highlight the **Cheapest Guaranteed Fit** without OOMs or overpaying.
+  * Review final pod settings & disk size, deploy `llama-server` in one click, and get a private HTTPS OpenAI-compatible `/v1` endpoint + Bearer key with live readiness polling and Stop/Terminate controls.
 * 🎯 **Byte-Accurate Memory Prediction:** Uses `llama-bench` and `isolated-reserve` to get exact allocations for:
   * Model Weights (GPU VRAM vs Host RAM offloading splits with `-ngl`)
   * KV Cache at exact context sizes (`-c 4096`, `8192`, `32768`, etc.)
