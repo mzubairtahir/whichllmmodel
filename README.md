@@ -36,7 +36,7 @@ While plenty of tools exist for running small models on a local PC, spinning up 
 ## 🚀 Getting Started
 
 ### Download Pre-built Release
-Download the latest Windows installer or portable `.exe` from the [Releases](https://github.com/your-username/whichllmmodel/releases) page.
+Download the latest Windows installer or portable `.exe` from the [Releases](https://github.com/mzubairtahir/whichllmmodel/releases) page.
 
 ### Build from Source
 
@@ -47,7 +47,7 @@ Download the latest Windows installer or portable `.exe` from the [Releases](htt
 
 #### Steps:
 ```bash
-git clone https://github.com/your-username/whichllmmodel.git
+git clone https://github.com/mzubairtahir/whichllmmodel.git
 cd whichllmmodel
 
 # Install frontend dependencies
